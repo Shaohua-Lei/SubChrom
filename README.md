@@ -104,7 +104,7 @@ python /path/to/SubChrom/scripts/PanelOfNormals.py -s samples.txt -g hg38 -o PoN
 Note: To differentiate the potential CNV event(s) of each chromosome from the diploid pair, chrA & chrB are annotated separately. For example, the CNV events of chrA/chrB in a cnLOH event are -1/+1, and a two-copy gain event can be +1/+1 or NA/+2.
 
 ### 2. Visualization in *CNV.png*
-![SJBALL032020_F1 cfDNA CNV](https://github.com/Shaohua-Lei/SubChrom/assets/146115901/a0785656-57b7-46f1-af9a-462c5d2cf75e)
+![SJBALL032020_F1 cfDNA CNV](https://github.com/Shaohua-Lei/SubChrom/assets/146115901/bfc1e4f5-3b4d-4aa4-9f0b-1b7ee02da066)
   - First panle: Mean coverage with a window size of 2M bp. Dotted line indicates the sequencing depth of diploid, which can be tuned using the option `-dd/--diploid_depth`.
   - Second panel: VAF distribution across the genome.
   - Third panel: Copy ratio of SNP markers (WGS) or panel bins (WES/custom panel) in grey, and CNV events in different colors.
