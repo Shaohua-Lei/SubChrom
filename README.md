@@ -67,7 +67,7 @@ Optional arguments:
                                Default: none. Example: /SubChrom/data/geneList.bed
 ```
 
-For local users at St. Jude, SubChrom [wrapper](https://github.com/Shaohua-Lei/SubChrom) scripts provided in the `StJude` directory are available for batch job submissions on the HPC cluster.
+For local users at St. Jude, SubChrom [wrapper](StJude/README.md)) scripts provided in the `StJude` directory are available for batch job submissions on the HPC cluster.
 
 ## Normal or Panel of Normals
 Normal or panel of normals (PoN) is not needed for WGS, while it is not required but highly recommended for WES and custom panel sequencing. To enable coverage segmentation and improve estimation of tumor fraction, normal/PoN is used to normalize coverage data from WES or custom panel.
