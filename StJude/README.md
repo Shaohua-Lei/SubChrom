@@ -40,7 +40,7 @@ Optional arguments:
 ```
 
 # Variant Calling
-The most time comsuming step of SubChrom is the germline variant calling (gatk HaplotypeCaller), the default setting above takes 24-48h for WGS (varies by sequencing depth), 3-6h for WES, and 3-6h for custom panel (varies by panel size). To expedite this process, the `VariantCalling.sh` script splits the genome, submits variant calling jobs for individual chromomose, and then merges them into one file for SubChrom. This stategy reduces the time of variant calling by ~90%, and the bedGraph file of your samples will be generated with separate jobs as well.
+The most time comsuming step of SubChrom is the germline variant calling (gatk HaplotypeCaller). The default setting above takes 24-48h for WGS and 3-6h for WES/custom panel, and it varies by sequencing depth and panel size. To expedite this process, the `VariantCalling.sh` script splits the genome, submits variant calling jobs for individual chromomose, and then merges them into one file for SubChrom. This stategy reduces the time of variant calling by ~90%, and the bedGraph file of your samples will be generated with separate jobs as well.
 
   - Run `VariantCalling.sh` with your sample list. 
   - Wait and complete those jobs. 
