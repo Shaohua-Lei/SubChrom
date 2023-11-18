@@ -9,7 +9,7 @@ SubChrom performs segmenation on coverage and variant allele frequency (VAF) for
     ```
     git clone git@github.com:MullighanLab/SubChrom.git
     ```
-2. Download the SubChrom [database](https://github.com/Shaohua-Lei/SubChrom) to the `/path/to/SubChrom/` directory and unzip it.
+2. Download the SubChrom [database](https://github.com/MullighanLab/SubChrom) to the `/path/to/SubChrom/` directory and unzip it.
 3. Install dependencies
    - [gatk (>=4.1.8.0)](https://gatk.broadinstitute.org/hc/en-us/articles/360036194592-Getting-started-with-GATK4)
    - [bcftools (>=1.14)](https://samtools.github.io/bcftools/bcftools.html)
