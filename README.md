@@ -54,17 +54,21 @@ Optional arguments:
    -g  --genome_build       Options: hg38 (default), hg19
    -n  --normal             Panel of Normals, or bedGraph file of a normal sample. /path/to/PoN.txt
                                Default: none
-   -mf --minTF              Minimal tumor fraction to report a CNV event. Default: 0.03. Minimum: 0.01
-   -ms --minSize            Minimal size (bp) to report a CNV event. Default: 100000. Minimum: 10000
-   -mb --minBins            Minimal number of bins to report a CNV event. Default: 30. Minimum: 10
+   -cs --coverage_seg       Perform coverage segmentation. Options: True, False (default)
+                               If --normal is none above for WGS/panel data, this is False by default
+   -mf --minTF              Minimal tumor fraction to report a CNV event. Default: 0.1. Minimum: 0.01
+   -ms --minSize            Minimal size (bp) to report a CNV event. Default: 1000000. Minimum: 10000
+   -mb --minBins            Minimal number of bins to report a CNV event. Default: 100. Minimum: 10
    -sg --sample_gender      Options: Male/M, Female/F, auto. Default: auto for automatic detection
    -dd --diploid_depth      How to compute the diploid depth.
                                Options: auto, chr1...chr22, chrX, a specific value such as 500
                                Default: auto for automatic optimization
    -cw --covWinSize         Coverage window size (bp) for visualization. Default: 2000000. Minimum: 500000
    -pf --plotTF             Plot tumor fraction or not. Options: True (default), False
-   -gl --gene_list          Gene list of interest for visulization. /path/to/geneList.bed
-                               Default: none. Example: /SubChrom/data/geneList.bed
+   -if --intermediate_file  Use intermediate files from the previous run, such as vcf file and segements
+                               Options: True (default), False (remove previous files and generate new ones)
+   -gl --gene_list          Gene list of interest for visualization. /path/to/geneList.bed
+                               Default: /SubChrom/data/geneList.bed
 ```
 
 For local users at St. Jude, SubChrom [wrapper](./StJude/README.md) scripts provided in the `StJude` directory are available for batch job submissions on the HPC cluster.
@@ -74,7 +78,7 @@ Normal or panel of normals (PoN) is not needed for WGS, while it is not required
 
 To use a normal for your target/tumor sample, the coverage bedGraph file of your normal sample can be added by option `-n/--normal` when running SubChrom above. The bedGraph file of any sample can be found after running SubChrom. Alternatively, the `bedGraph.sh` script can generate one (see usage by `-h/--help`). Please note that your target and normal samples do not have to be an exact pair, they can come from different individuals. In addition, your normal can be a tumor sample, if it has no copy loss/gain events.
 ```
-/path/to/SubChrom/scripts/bedGraph.sh -s filename -i sample.bam -d WES -p panel_bin.bed -o .
+/path/to/SubChrom/scripts/bedGraph.sh -s sample_ID -i sample.bam -d WES -p panel_bin.bed -o .
 ```
 
 To create a PoN file, a bedGraph file for each sample in your PoN should be generated as above. Then, use the `PanelOfNormals.py` script to take your list of bedGraph files (see format in usage by `-h/--help`).
