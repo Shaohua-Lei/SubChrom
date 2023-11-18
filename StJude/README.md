@@ -21,17 +21,21 @@ Optional arguments:
    -g  --genome_build       Options: hg38 (default), hg19
    -n  --normal             Panel of Normals, or bedGraph file of a normal sample. /path/to/PoN.txt
                                Options: 'cfDNA' to use pre-computed PoN. Default: none
-   -mf --minTF              Minimal tumor fraction to report a CNV event. Default: 0.03. Minimum: 0.01
-   -ms --minSize            Minimal size (bp) to report a CNV event. Default: 100000. Minimum: 10000
-   -mb --minBins            Minimal number of bins to report a CNV event. Default: 30. Minimum: 10
+   -cs --coverage_seg       Perform coverage segmentation. Options: True, False (default)
+                               If --normal is none above for WGS/panel data, this is False by default
+   -mf --minTF              Minimal tumor fraction to report a CNV event. Default: 0.1. Minimum: 0.01
+   -ms --minSize            Minimal size (bp) to report a CNV event. Default: 1000000. Minimum: 10000
+   -mb --minBins            Minimal number of bins to report a CNV event. Default: 100. Minimum: 10
    -sg --sample_gender      Options: Male/M, Female/F, auto. Default: auto for automatic detection
    -dd --diploid_depth      How to compute the diploid depth.
                                Options: auto, chr1...chr22, chrX, a specific value such as 500
                                Default: auto for automatic optimization
    -cw --covWinSize         Coverage window size (bp) for visualization. Default: 2000000. Minimum: 500000
    -pf --plotTF             Plot tumor fraction or not. Options: True (default), False
-   -gl --gene_list          Gene list of interest for visulization. /path/to/geneList.bed
-                               Default: none. 'cfDNA': /SubChrom/data/geneList.bed
+   -if --intermediate_file  Use intermediate files from the previous run, such as vcf file and segements
+                               Options: True (default), False (remove previous files and generate new ones)
+   -gl --gene_list          Gene list of interest for visualization. /path/to/geneList.bed
+                               Default: /SubChrom/data/geneList.bed
 
    -q  --queue               St. Jude HPC queue (Default: standard)
    -l  --log                 Analysis log file name (Default: SubChrom.run.log)
