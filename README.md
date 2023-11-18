@@ -1,5 +1,5 @@
 # *SubChrom*
-A tool for dectecting ***Sub***clonal ***Chrom***osomal aberrations and estimating tumor fraction from next generation sequencing data.
+A tool for dectecting ***Sub***clonal ***Chrom***osomal aberrations and estimating tumor fraction in cell-free DNA from next generation sequencing data.
 
 ## Introduction
 SubChrom performs segmenation on coverage and variant allele frequency (VAF) for the detection of copy number variations (CNV), such as copy gain, copy loss, and copy neutral loss of heterozygosity (cnLOH). SubChrom is optimized to work on different types of data, including whole genome sequencing (WGS >15X), whole exome sequencing (WES), and especially custom panel sequencing. The estimate of tumor fraction is computed from the coverage and VAF changes of CNV events.
@@ -132,4 +132,4 @@ This program is free software: you can redistribute it and/or modify it under th
 
 This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
-You should have received a copy of the GNU General Public License along with this program. If not, see http://www.gnu.org/licenses/. For additional questions about license, please contact the St. Jude Office of Technology Licensing at scott.elmer@stjude.org.
+You should have received a copy of the GNU General Public License along with this program. If not, see http://www.gnu.org/licenses/. For additional questions about the License, please contact the St. Jude Office of Technology Licensing at scott.elmer@stjude.org.
