@@ -3,7 +3,8 @@ A tool for dectecting ***Sub***clonal ***Chrom***osomal aberrations and estimati
 
 ## Introduction
 SubChrom performs segmenation on coverage and variant allele frequency (VAF) for the detection of copy number variations (CNV), such as copy gain, copy loss, and copy neutral loss of heterozygosity (cnLOH). SubChrom is optimized to work on different types of data, including whole genome sequencing (WGS >15X), whole exome sequencing (WES), and especially custom panel sequencing. The estimate of tumor fraction is computed from the coverage and VAF changes of CNV events.
-![Slide1](https://github.com/MullighanLab/SubChrom/assets/146115901/69714485-ddba-47fd-9f8e-f6e5d4dbce77)
+![Slide1](https://github.com/MullighanLab/SubChrom/assets/146115901/35145a71-72e3-4ef5-bd1f-701ca47b189a)
+
 
 
 
