@@ -121,7 +121,7 @@ Note: To differentiate the potential CNV event(s) of each chromosome from the di
 An enlarged view of the second & third panels of *CNV.png* to visualize focal events, and genes of interest can be annotated in this figure using the option `-gl/--gene_list`.
 
 ## Citation
-*(manuscript in preparation)*
+Lei, S., Jia, S., Takalkar, S. et al. Genomic profiling of circulating tumor DNA for childhood cancers. Leukemia (2024). https://doi.org/10.1038/s41375-024-02461-x
 
 ## Contacts
 For questions and feedback, please go to the *Discussions* or *Issues* section, or email <shaohua.lei@stjude.org>
