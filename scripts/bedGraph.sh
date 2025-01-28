@@ -88,7 +88,7 @@ elif [[ ! -f $BAM ]]; then
     echo "ERROR: Input bam file ($DATA) not found!"
     usage
     exit 1
-elif [[ ! -f $PANELBIN ]]; then
+elif [[ $PANELBIN != 'WGS' ]] && [[ ! -f $PANELBIN ]]; then
     echo "ERROR: panel bin bed file ($PANELBIN) not found!"
     usage
     exit 1
