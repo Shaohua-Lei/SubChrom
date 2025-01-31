@@ -12,14 +12,15 @@ SNPmarker='NA'
 
 OUTPUT=$(pwd)
 GBUILD='hg38'
-PON='N'
-covSeg='False'
+PON='none'
+COVseg='False'
+ROHseg='False'
 minTF=0.1
 minSize=1000000
 minBins=100
 GENDER='auto'
 dipDep='auto'
-covWindow=2000000
+covWindow='auto'
 plotTF='True'
 preFile='True'
 GENES='cfDNA'
@@ -29,7 +30,7 @@ LOG='SubChrom.run.log'
 TASK_S=1
 TASK_E=999999
 
-VERSION='0.1.0 (November 18, 2023)'
+VERSION='0.1.0 (October 17, 2024)'
 
 #################################################################################
 # Display usage
@@ -39,18 +40,18 @@ usage()
 {
     echo ""
     echo "****************************************************************************************************"
-    echo "Program: SubChrom CNV calling"
+    echo "Program: SubChrom CNV/cnLOH calling"
     echo -e "Version: $VERSION"
     echo "****************************************************************************************************"
     echo ""
-    echo "Usage: $0 -s sample.list.txt -d cfDNA -r hg38 -p cfDNA -n PoN.txt"
+    echo "Usage: $0 -s sample.list.txt -d cfDNA -r hg38 -p cfDNA -md hg38"
     echo ""
     echo -e "   -h  --help                Show this help message and exit"
     echo ""
     echo -e "Required arguments:"
-    echo -e "   -s  --sample_list        Sample list with names and data paths. /path/to/sample.txt"
+    echo -e "   -s  --sample_list        Sample list with names and data paths. /path/to/sample.list.txt"
     echo -e "                               Format: <folder/patient_name><tab><sample_name><tab><data_path>"
-    echo -e "   -d  --data_type          Sequencing data type. Options: WGS, WES, panel, custom, etc."
+    echo -e "   -d  --data_type          Sequencing data type. Options: WGS, WES, cfDNA, panel, custom, etc."
     echo -e "   -r  --reference          Genome reference (same for bam files). /path/to/reference.fa"
     echo -e "                               Options: 'hg38' for the CAB hg38, 'hg19' for the CompBio hg19"
     echo -e "   -p  --panel_bin          Bed file of your panel bins. /path/to/panel_bin.bed"
@@ -59,27 +60,30 @@ usage()
     echo -e "                               Options: 'hg19' or 'hg38' for /SubChrom/data/SNPmarker_*/"
     echo ""
     echo -e "Optional arguments:"
-    echo -e "   -o  --output             Ouput directory. Default: current directory"
+    echo -e "   -o  --output             Ouput directory. Default: ./ (current directory)"
     echo -e "   -g  --genome_build       Options: hg38 (default), hg19"
     echo -e "   -n  --normal             Panel of Normals, or bedGraph file of a normal sample. /path/to/PoN.txt"
     echo -e "                               Options: 'cfDNA' to use pre-computed PoN. Default: none"
     echo -e "   -cs --coverage_seg       Perform coverage segmentation. Options: True, False (default)"
-    echo -e "                               If --normal is none above for WGS/panel data, this is False by default"
+    echo -e "                               If --normal is none above for WES/panel data, this is False by default"
+    echo -e "   -rs --ROH_seg            Perform ROH (runs of homozygosity) segmentation. Options: True, False (default)"
+    echo -e "                               Required for high purity samples, in which no heterozygotes in cnLOH and loss"
     echo -e "   -mf --minTF              Minimal tumor fraction to report a CNV event. Default: 0.1. Minimum: 0.01"
     echo -e "   -ms --minSize            Minimal size (bp) to report a CNV event. Default: 1000000. Minimum: 10000"
     echo -e "   -mb --minBins            Minimal number of bins to report a CNV event. Default: 100. Minimum: 10"
     echo -e "   -sg --sample_gender      Options: Male/M, Female/F, auto. Default: auto for automatic detection"
     echo -e "   -dd --diploid_depth      How to compute the diploid depth."
-    echo -e "                               Options: auto, chr1...chr22, chrX, a specific value such as 500"
+    echo -e "                               Options: auto, chr1, ..., chr22, chrX, a specific value such as 500"
     echo -e "                               Default: auto for automatic optimization"
-    echo -e "   -cw --covWinSize         Coverage window size (bp) for visualization. Default: 2000000. Minimum: 500000"
+    echo -e "   -cw --covWinSize         Coverage window size (bp) for visualization"
+    echo -e "                               Default: auto (WGS, 1000000; WES/cfDNA, 2000000. Minimum: 500000"
     echo -e "   -pf --plotTF             Plot tumor fraction or not. Options: True (default), False"
     echo -e "   -if --intermediate_file  Use intermediate files from the previous run, such as vcf file and segements"
     echo -e "                               Options: True (default), False (remove previous files and generate new ones)"
     echo -e "   -gl --gene_list          Gene list of interest for visualization. /path/to/geneList.bed"
     echo -e "                               Default: /SubChrom/data/geneList.bed"
     echo ""
-    echo -e "   -q  --queue               St. Jude HPC queue (Default: standard)"
+    echo -e "   -q  --queue               St. Jude HPC queue (Default: rhel8_standard)"
     echo -e "   -l  --log                 Analysis log file name (Default: $LOG)"
     echo -e "   -S  --task_start_line     Task N start to run (Default $TASK_S)"
     echo -e "   -E  --task_end_line       Task N stop to run  (Default $TASK_E)"
@@ -129,7 +133,11 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         -cs | --coverage_seg)
-            covSeg=$2
+            COVseg=$2
+            shift
+            ;;
+        -rs | --ROH_seg)
+            ROHseg=$2
             shift
             ;;
         -mf | --minTF)
@@ -197,6 +205,7 @@ done
 # Setup
 #################################################################################
 
+echo ""
 # code & directory
 script_path="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
@@ -227,11 +236,35 @@ elif [[ $SNPmarker == 'NA' ]]; then
     exit 1
 fi
 
+# check the sample list
+COLUMN=$(head -n1 $SAMPLE_LIST | awk '{print NF}')
+if [[ $COLUMN != 3 ]]; then
+    echo "ERROR: sample_list ($SAMPLE_LIST) need 3 columns!"
+    usage
+    exit 1
+fi
+
+ROW1=$(wc -l < $SAMPLE_LIST)
+ROW2=$(sort -u $SAMPLE_LIST | wc -l)
+if [[ $ROW1 != $ROW2 ]]; then
+    echo "ERROR: Duplicate rows in sample_list ($SAMPLE_LIST)!"
+    usage
+    exit 1
+fi
+
+ROW1=$(cut -f1-2 $SAMPLE_LIST | wc -l)
+ROW2=$(cut -f1-2 $SAMPLE_LIST | sort -u | wc -l)
+if [[ $ROW1 != $ROW2 ]]; then
+    echo "ERROR: Duplicate folder & sample names in sample_list ($SAMPLE_LIST)!"
+    usage
+    exit 1
+fi
+
 # default reference
 if [[ $REF == 'hg19' ]]; then
     REF="/research/rgs01/applications/hpcf/authorized_apps/cab/Automation/REF/Homo_sapiens/NCBI/GRCh37-lite/bwa-index/GRCh37-lite_wochr/GRCh37-lite.fa"
 elif [[ $REF == 'hg19MP' ]]; then
-    REF="/research/rgs01/applications/hpcf/authorized_apps/cab/Automation/REF/Homo_sapiens/NCBI/GRCh37-lite/bwa-index/0.7.17-r1188/GRCh37-lite_wchr.fa"
+    REF="/home/slei/Group_dir/MolPath/hg19.fa"
 elif [[ $REF == 'hg38' ]]; then
     REF="/research/rgs01/applications/hpcf/authorized_apps/cab/Automation/REF/Homo_sapiens/NCBI/GRCh38_no_alt/bwa-index/0.7.17-r1188/GCA_000001405.15_GRCh38_no_alt_analysis_set.fa"
 fi
@@ -253,9 +286,9 @@ fi
 # default panel bin
 if [[ $PANELBIN == 'WES' ]] || [[ $PANELBIN == 'cfDNA' ]]; then 
     if [[ $G_CHR == 'Y' ]]; then
-        PANELBIN=$script_path/../data/${GBUILD}.${PANELBIN}.bed.chr
+        PANELBIN=$script_path/../data/${PANELBIN}.${GBUILD}.chr.bed
     elif [[ $G_CHR == 'N' ]]; then
-        PANELBIN=$script_path/../data/${GBUILD}.${PANELBIN}.bed.nochr
+        PANELBIN=$script_path/../data/${PANELBIN}.${GBUILD}.nochr.bed
     fi
 fi
 
@@ -316,10 +349,19 @@ if [[ $PON == 'WES' ]] || [[ $PON == 'cfDNA' ]]; then
 fi
 
 # check PoN
-if [[ $PON != 'N' ]] && [[ ! -f $PON ]]; then
+if [[ $PON != 'none' ]] && [[ ! -f $PON ]]; then
     echo "ERROR: Panel of Normals ($PON) not found!"
     usage
     exit 1
+fi
+
+# covWindow
+if [[ $covWindow == 'auto' ]]; then
+    if [[ $DTYPE == 'WGS' ]]; then
+        covWindow=1000000
+    else
+        covWindow=2000000
+    fi
 fi
 
 # check gene list
@@ -348,6 +390,7 @@ module load bedtools/2.30.0
 # Records
 #################################################################################
 
+echo ""
 echo -e "[VERSION] SubChrom $VERSION"
 echo -e "[DATE]    `date`"
 echo -e "[SAMPLE]  $SAMPLE_LIST"
@@ -359,7 +402,8 @@ echo ""
 echo -e "[OUTPUT]  $OUTPUT"
 echo -e "[GBUILD]  $GBUILD"
 echo -e "[PON]     $PON"
-echo -e "[covSeg]  $covSeg"
+echo -e "[COVseg]  $COVseg"
+echo -e "[ROHseg]  $ROHseg"
 echo -e "[minTF]   $minTF"
 echo -e "[minSize] $minSize"
 echo -e "[minBins] $minBins"
@@ -379,7 +423,7 @@ echo -e "[P_CHR]   $P_CHR"
 
 echo -e "[Version] $VERSION" >>$LOG
 echo -e "[DATE]    `date`" >> $LOG
-echo -e "[CMD]     $0 -s $SAMPLE_LIST -d $DTYPE -r $REF -p $PANELBIN -md $SNPmarker -o $OUTPUT -g $GBUILD -n $PON -cs $covSeg -mf $minTF -ms $minSize -mb $minBins -sg $GENDER -dd $dipDep -cw $covWindow -pf $plotTF -if $preFile -gl $GENES -q $QUEUE -l $LOG -S $TASK_S -E $TASK_E\n" >> $LOG
+echo -e "[CMD]     $0 -s $SAMPLE_LIST -d $DTYPE -r $REF -p $PANELBIN -md $SNPmarker -o $OUTPUT -g $GBUILD -n $PON -cs $COVseg -rs $ROHseg -mf $minTF -ms $minSize -mb $minBins -sg $GENDER -dd $dipDep -cw $covWindow -pf $plotTF -if $preFile -gl $GENES -q $QUEUE -l $LOG -S $TASK_S -E $TASK_E\n" >> $LOG
 
 #################################################################################
 # Analysis
@@ -387,15 +431,8 @@ echo -e "[CMD]     $0 -s $SAMPLE_LIST -d $DTYPE -r $REF -p $PANELBIN -md $SNPmar
 
 cd $OUTPUT
 
-# number of columns in the sample list
-COLUMN=$(head -n1 $SAMPLE_LIST | awk '{print NF}')
-
 line_num=0
-while IFS=$'\t' read FOLDER SAMPLE DATA NORMAL; do
-    # 3 or 4 columns in the sample list
-    if [[ $COLUMN == 3 ]]; then
-        NORMAL='NA'
-    fi
+while IFS=$'\t' read FOLDER SAMPLE DATA; do
     
     line_num=$(( $line_num + 1 ))
     
@@ -404,7 +441,6 @@ while IFS=$'\t' read FOLDER SAMPLE DATA NORMAL; do
         echo -e "TASK#:   $line_num"
         echo -e "SAMPLE:  $SAMPLE"
         echo -e "DATA:    $DATA"
-        echo -e "NORMAL:  $NORMAL"
 
         mkdir -p $FOLDER
         cd $FOLDER
@@ -418,7 +454,7 @@ while IFS=$'\t' read FOLDER SAMPLE DATA NORMAL; do
         fi
 
         ################ CNV calling ################
-        cmd="$script_path/../scripts/SubChrom.sh -s $SAMPLE -i $DATA -d $DTYPE -r $REF -p $PANELBIN -md $SNPmarker -g $GBUILD -n $PON -cs $covSeg -mf $minTF -ms $minSize -mb $minBins -sg $GENDER -dd $dipDep -cw $covWindow -pf $plotTF -if $preFile -gl $GENES"
+        cmd="$script_path/../scripts/SubChrom.sh -s $SAMPLE -i $DATA -d $DTYPE -r $REF -p $PANELBIN -md $SNPmarker -g $GBUILD -n $PON -cs $COVseg -rs $ROHseg -mf $minTF -ms $minSize -mb $minBins -sg $GENDER -dd $dipDep -cw $covWindow -pf $plotTF -if $preFile -gl $GENES"
         echo -e "******************** run SubChrom ********************\n$cmd"
         bsub -P SubChrom -J ${SAMPLE}.SC -q $QUEUE -M 10000 -n 2 -R "span[hosts=1]" -eo ${WORK_DIR}/SC.err -oo ${WORK_DIR}/SC.out $cmd
 

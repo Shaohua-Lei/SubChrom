@@ -9,13 +9,14 @@ DTYPE='NA'
 REF='NA'
 PANELBIN='NA'
 
+OUTPUT=$(pwd)
 GBUILD='hg38'
 QUEUE='standard'
 LOG='SubChrom.run.log'
 TASK_S=1
 TASK_E=999999
 
-VERSION='0.1.0 (September 29, 2023)'
+VERSION='0.1.0 (October 17, 2024)'
 
 #################################################################################
 # Display usage
@@ -27,15 +28,15 @@ usage()
     echo "Program: SubChrom variant calling"
     echo -e "Version: $VERSION"
     echo ""
-    echo "Usage: $0 -s sample.list.txt -d cfDNA -r hg38 -p cfDNA"
+    echo "Usage: $0 -s sample.list.txt -d WGS -r hg38 -p WGS"
     echo ""
     echo -e "\t-h --help"
     echo -e "\t-s --sample_list         [Required] Sample list with sample names and data paths."
-    echo -e "\t                            Formats: <Folder_name><tab><Sample_name><tab><Sample_path>"
+    echo -e "\t                            Format: <folder/patient_name><tab><sample_name><tab><data_path>"
     echo -e "\t-d --data_type           [Required] Options: WGS, WES, cfDNA, panel, etc"
     echo -e "\t-r --reference           [Required] /path/to/reference.fa"
     echo -e "\t                            Provide genome reference used for the original bam file"
-    echo -e "\t                            Options: 'hg38' to use the CAB version, 'hg19' to use the CompBio version"
+    echo -e "\t                            Options: 'hg38' for the CAB hg38, 'hg19' for the CompBio hg19"
     echo -e "\t-p --panel_bin           [Required] /path/to/PanelBin.bed"
     echo -e "\t                            Options: 'WES' or 'cfDNA' to use pre-computed files, 'WGS' to skip"
     echo ""
@@ -106,6 +107,7 @@ done
 # Setup
 #################################################################################
 
+echo ""
 # code & work directory
 script_path="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 main_dir=$(pwd)
@@ -137,11 +139,35 @@ elif [[ $GBUILD != 'hg38' ]] && [[ $GBUILD != 'hg19' ]]; then
     exit 1
 fi
 
+# check the sample list
+COLUMN=$(head -n1 $SAMPLE_LIST | awk '{print NF}')
+if [[ $COLUMN != 3 ]]; then
+    echo "ERROR: sample_list ($SAMPLE_LIST) need 3 columns!"
+    usage
+    exit 1
+fi
+
+ROW1=$(wc -l < $SAMPLE_LIST)
+ROW2=$(sort -u $SAMPLE_LIST | wc -l)
+if [[ $ROW1 != $ROW2 ]]; then
+    echo "ERROR: Duplicate rows in sample_list ($SAMPLE_LIST)!"
+    usage
+    exit 1
+fi
+
+ROW1=$(cut -f1-2 $SAMPLE_LIST | wc -l)
+ROW2=$(cut -f1-2 $SAMPLE_LIST | sort -u | wc -l)
+if [[ $ROW1 != $ROW2 ]]; then
+    echo "ERROR: Duplicate folder & sample names in sample_list ($SAMPLE_LIST)!"
+    usage
+    exit 1
+fi
+
 # default reference
 if [[ $REF == 'hg19' ]]; then
     REF="/research/rgs01/applications/hpcf/authorized_apps/cab/Automation/REF/Homo_sapiens/NCBI/GRCh37-lite/bwa-index/GRCh37-lite_wochr/GRCh37-lite.fa"
 elif [[ $REF == 'hg19MP' ]]; then
-    REF="/research/rgs01/applications/hpcf/authorized_apps/cab/Automation/REF/Homo_sapiens/NCBI/GRCh37-lite/bwa-index/0.7.17-r1188/GRCh37-lite_wchr.fa"
+    REF="/home/slei/Group_dir/MolPath/hg19.fa"
 elif [[ $REF == 'hg38' ]]; then
     REF="/research/rgs01/applications/hpcf/authorized_apps/cab/Automation/REF/Homo_sapiens/NCBI/GRCh38_no_alt/bwa-index/0.7.17-r1188/GCA_000001405.15_GRCh38_no_alt_analysis_set.fa"
 fi
@@ -163,9 +189,9 @@ fi
 # default panel bin
 if [[ $PANELBIN == 'WES' ]] || [[ $PANELBIN == 'cfDNA' ]]; then 
     if [[ $G_CHR == 'Y' ]]; then
-        PANELBIN=$script_path/../data/${GBUILD}.${PANELBIN}.bed.chr
+        PANELBIN=$script_path/../data/${PANELBIN}.${GBUILD}.chr.bed
     elif [[ $G_CHR == 'N' ]]; then
-        PANELBIN=$script_path/../data/${GBUILD}.${PANELBIN}.bed.nochr
+        PANELBIN=$script_path/../data/${PANELBIN}.${GBUILD}.nochr.bed
     fi
 fi
 
@@ -225,15 +251,10 @@ echo -e "[CMD]     $0 -s $SAMPLE_LIST -d $DTYPE -r $REF -p $PANELBIN -g $GBUILD 
 # Analysis
 #################################################################################
 
-# number of columns in the sample list
-COLUMN=$(head -n1 $SAMPLE_LIST | awk '{print NF}')
+cd $OUTPUT
 
 line_num=0
-while IFS=$'\t' read FOLDER SAMPLE DATA DIP_CHR; do      
-    # 3 or 4 columns in the sample list
-    if [[ $COLUMN == 3 ]]; then
-        DIP_CHR='auto'
-    fi
+while IFS=$'\t' read FOLDER SAMPLE DATA; do      
 
     line_num=$(( $line_num + 1 ))
 
@@ -252,7 +273,6 @@ while IFS=$'\t' read FOLDER SAMPLE DATA DIP_CHR; do
         cd $FOLDER
 
         WORK_DIR=${SAMPLE}.${DTYPE}.SubChrom
-        
         # rename existing folder or mkdir a new one
         if [[ -d ${WORK_DIR}.unpaired ]]; then
             mv ${WORK_DIR}.unpaired ${WORK_DIR}
@@ -265,15 +285,17 @@ while IFS=$'\t' read FOLDER SAMPLE DATA DIP_CHR; do
         ################ BAM to bigwig and bedGraph ################
         if [[ $DATA == *'bam' ]] && [[ ! -f ${SAMPLE}.${DTYPE}.bedGraph ]]; then
             cmd="$script_path/../scripts/bedGraph.sh -s $SAMPLE -i $DATA -d $DTYPE -p $PANELBIN"
-            echo -e "******************** run bedGraph ********************\n$cmd"
-            bsub -P SubChrom -J ${SAMPLE}.bG -q standard -M 3000 -eo bG.err -oo bG.out $cmd
+            echo -e "******************** run bedGraph ********************"
+            echo -e "$cmd"
+            bsub -P SubChrom -J ${SAMPLE}.bG -q $QUEUE -M 3000 -eo bG.err -oo bG.out $cmd
         fi
 
         ################ Variant calling ################
         if [[ $DATA == *'bam' ]] && [[ ! -f ${SAMPLE}.${DTYPE}.gatkHC.vcf.gz ]]; then
-            cmd="$script_path/gatkHC.sh $SAMPLE $DATA $DTYPE $REF $G_CHR"
-            echo -e "******************** run gatkHC ********************\n$cmd"
-            bsub -P SubChrom -J ${SAMPLE}.HC -q $QUEUE -M 4000 -n 2 -R "span[hosts=1]" -eo HC.err -oo HC.out $cmd
+            cmd="$script_path/gatkHC.sh $SAMPLE $DATA $DTYPE $REF $G_CHR $QUEUE"
+            echo -e "******************** run gatkHC ********************"
+            echo -e "$cmd"
+            #bsub -P SubChrom -J ${SAMPLE}.HC -q $QUEUE -M 3000 -eo HC.err -oo HC.out $cmd
         fi
         cd $main_dir
     fi
