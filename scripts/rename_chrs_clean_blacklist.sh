@@ -20,3 +20,6 @@ echo $cmd
 
 # $cmd did not work
 bcftools view -v snps -T ^$script_path/../data/${GBUILD}-blacklist.v2.bed.nochr ${SAMPLE}.${DTYPE}.gatkHC_nochr.vcf.gz | bcftools query -f '[%CHROM\t%POS\t%REF\t%ALT\t%DP\t%AD{0}\t%AD{1}]\n' -o ${SAMPLE}.${DTYPE}.snp.txt
+
+# remove temp files
+rm ${SAMPLE}.${DTYPE}.gatkHC_nochr.vcf.gz*

@@ -23,7 +23,7 @@ def computeCOV(df1):
     mm50 = (data[quantile:-quantile]).mean()
     return round(mm50, 5)
 
-def normalization(sammple, gender, path, build):
+def normalization(sample, gender, path, build):
     df = bedGraph(path)
     mm50 = computeCOV(df)
     

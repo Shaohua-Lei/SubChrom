@@ -1,10 +1,12 @@
 #!/usr/bin/env python
+# make sure bedtools is installed and working for using pybedtools
 
 import pandas as pd
 import numpy as np
 import argparse
 import pybedtools
 import sys
+import os
 
 def main():
     parser = argparse.ArgumentParser(description="SubChrom panel binning")
@@ -31,11 +33,12 @@ def main():
     df = pd.read_csv(Panel, sep='\t', header=None, dtype={0: str})
 
     # with or without CHR
+    code_directory = os.path.dirname(os.path.abspath(__file__))
     if df.iloc[3,0][:3] == 'chr':
-        ENCODE = '../data/' + build + '-blacklist.v2.bed.gz'
+        ENCODE = code_directory + '/../data/' + build + '-blacklist.v2.bed.gz'
         print("'chr' detected in the input file")
     else:
-        ENCODE = '../data/' + build + '-blacklist.v2.bed.nochr'
+        ENCODE = code_directory + '/../data/' + build + '-blacklist.v2.bed.nochr'
         print("'chr' not detected in the input file")
     print('Blacklist:', ENCODE)
 

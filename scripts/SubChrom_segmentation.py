@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# coding: utf-8
 
 import numpy as np
 import pandas as pd
@@ -15,6 +14,7 @@ import argparse
 import os
 import shutil
 import pybedtools
+import sys
 
 ################################################################
 # load variant file and keep good SNP markers
@@ -70,19 +70,12 @@ def load_variants(path):
     print("********** Loading variants raw data ... **********")
     df = pd.read_csv(path, sep='\t', names=['CHR','POS','REF','ALT','COV','COV_REF','COV_ALT'],
                      dtype={'CHR':str,'POS':int,'REF':str,'ALT':str,'COV':int,'COV_ALT':int})
-    df = df[(df.COV>=8) & (df.COV_ALT>0)] # keep REF/REF variant for WGS coverage purposes
+    df = df[(df.COV>=8) & (df.COV_ALT>0)]
     # remove 'chr' from chromosome names
     if df.iloc[0,0][:3] == 'chr': 
         df.CHR = pd.DataFrame(df.CHR.str[3:])
     # variant full name
     df['variant'] = df.CHR + '.' + df.POS.astype(str) + '.' + df.REF + '.' + df.ALT
-    # compute VAF
-    lowVAF = df[df.COV_ALT < 3].index
-    df.loc[lowVAF, 'VAF'] = 0
-    highVAF = df[df.COV_REF < 3].index
-    df.loc[highVAF, 'VAF'] = 1
-    normVAF = df[(df.COV_ALT >= 3) & (df.COV_REF >= 3)].index
-    df.loc[normVAF, 'VAF'] = round(df.loc[normVAF, 'COV_ALT'] / df.loc[normVAF, 'COV'], 5)
     return df
 
 def filter_variants(variants, build, SNPmarker):
@@ -128,34 +121,45 @@ def filter_markers(dictSNVall, build, dataType, bedGraph):
     # minCOV: minimal coverage to keep a marker.
     # minMAC: minimal minor allele count to keep a heterozygote.
     if dataType == 'WGS': # WGS variants has been filtered before
+        dictRawDepth = []
+        for CHR in range(1,23):
+            dictRawDepth.append(dictSNVall[str(CHR)].COV.median())
+        rawDepth = np.median(dictRawDepth)
         minCOV,minMAC = 8,3
-        rawDepth = dictSNVall['1'].COV.median()
     else:
         # compute rawDepth
         dfBG = pd.read_csv(bedGraph, sep='\t',header=0, names=["CHR", "POS", "END", "COV"], dtype={'CHR':str})
         if dfBG.iloc[0,0][:3] == 'chr': 
             dfBG.CHR = dfBG.CHR.str[3:]
         dfBG = dfBG[(dfBG.CHR != 'X') & (dfBG.CHR != 'Y')]
-        rawDepth = round(dfBG.COV.median(), 3)
-        
+        rawDepth = dfBG.COV.median()
         minCOV = np.max([15, round(rawDepth/30)]) # >=15 for WES and cfDNA data
         minMAC = round(minCOV/3)
+        
+    if dataType == 'WGS' and rawDepth < 15:
+        print("Low coverage data (<15x) failed SubChrom:", rawDepth)
+        sys.exit(1)
+            
     print('dataType:', dataType)
     print('rawDepth:', rawDepth)
     print('minCOV to keep a SNP marker:', minCOV)
     print('minMAC to keep a heterozygotes:', minMAC)
      
-    # filter markers 
+    # filter markers
     dictSNV = {}
     genoInfo = genomeDatabase(build)
     for CHR in dictSNVall:
-        # update VAF and COV
+        # filter COV
         df = dictSNVall[CHR].copy()
+        df['VAF'] = np.nan # define VAF for empty df, such as chrY
         df = df[df.COV >= minCOV]
+        # compute VAF
         lowVAF = df[df.COV_ALT < minMAC].index
         df.loc[lowVAF, 'VAF'] = 0
         highVAF = df[df.COV_REF < minMAC].index
         df.loc[highVAF, 'VAF'] = 1
+        normVAF = df[(df.COV_ALT >= minMAC) & (df.COV_REF >= minMAC)].index
+        df.loc[normVAF, 'VAF'] = round(df.loc[normVAF, 'COV_ALT'] / df.loc[normVAF, 'COV'], 5)
         # PlotPos
         df = pd.merge(df, genoInfo[['prevLen']], left_on='CHR', right_index=True, how='left')
         df['PlotPos'] = df.POS + df.prevLen
@@ -163,13 +167,14 @@ def filter_markers(dictSNVall, build, dataType, bedGraph):
         df.drop(['prevLen', 'index'],axis=1,inplace=True)
         dictSNV[CHR] = df
         
+        # genome info
         # WGS: median of snpCount_1Mb = 1136, hetCount_1Mb = 683, hetRatio = 0.6
         if len(df)>0:
-            # genome info
+            chrSize = genoInfo.loc[CHR, 'chrSize']
             genoInfo.loc[CHR, 'snpCount'] = len(df)
-            genoInfo.loc[CHR, 'snpCount_1Mb'] = round(len(df)*1e6/genoInfo.loc[CHR, 'chrSize'],3)
+            genoInfo.loc[CHR, 'snpCount_1Mb'] = round(len(df)*1e6/chrSize,3)
             genoInfo.loc[CHR, 'hetCount'] = ((df.VAF>0) & (df.VAF<1)).sum()
-            genoInfo.loc[CHR, 'hetCount_1Mb'] = round(genoInfo.loc[CHR, 'hetCount']*1e6/genoInfo.loc[CHR, 'chrSize'], 3)
+            genoInfo.loc[CHR, 'hetCount_1Mb'] = round(genoInfo.loc[CHR, 'hetCount']*1e6/chrSize, 3)
             vafMeanCHR = df[(df.VAF>0) & (df.VAF<1)].VAF.mean()
             # vafMeanCHR can be >>0.5, such as in Loss or cn_LOH events
             genoInfo.loc[CHR, 'vafMeanCHR'] = np.min([vafMeanCHR, 0.5]) 
@@ -194,15 +199,16 @@ def get_gender(GENDER, genoInfo, dataType):
     elif dataType == 'WGS':
         if genoInfo.loc['Y','snpCount'] > 30:
             gender, chrY = 'M', 'Y'
-        # very likely a male
-        elif genoInfo.loc['X','hetCount'] < 3000: 
+        # most likely a male, but also possibly a female with X_loss
+        elif genoInfo.loc['X','hetRatio'] < 0.2: 
             gender, chrY = 'M', 'Y_loss'
         else:
             gender, chrY = 'F','no_Y'
     else:
         if genoInfo.loc['Y','snpCount'] > 30:
             gender, chrY = 'M', 'Y'
-        elif genoInfo.loc['X','hetCount'] < 300:
+        # most likely a male, but also possibly a female with X_loss
+        elif genoInfo.loc['X','hetRatio'] < 0.2:
             gender, chrY = 'M','Unknown'
         else:
             gender, chrY = 'F','no_Y'
@@ -220,7 +226,7 @@ def load_coverage(dictSNV, bedGraph, genoInfo, dataType, PON):
         print('WGS: dictCOV = dictSNV')
         return dictSNV
         
-    if PON == 'N':
+    if PON == 'none':
         print('Returning raw coverage ...')
         df = pd.read_csv(bedGraph, sep='\t',header=0, names=["CHR", "POS", "END", "COV"], dtype={'CHR':str})
         df = df[df.COV >= 8]
@@ -279,13 +285,14 @@ def computeCOV(dfSNV, START, END, dataType):
         SEM_mm50 = np.std(data[quantile:-quantile])/mm50
     return covCount, round(mm50, 5), round(SEM_mm50, 5)
 
-def coverage_chr(dictCOV, dictSNV, CHR, genoInfo, gender, covWindow, dataType):
-    # build
+def genoInfo2build(genoInfo):
     if genoInfo.loc['1', 'chrSize'] == 249250621:
-        build = 'hg19'
+        return 'hg19'
     elif genoInfo.loc['1', 'chrSize'] == 248956422:
-        build = 'hg38'
-        
+        return 'hg38'
+
+def coverage_chr(dictCOV, dictSNV, CHR, genoInfo, gender, covWindow, dataType):
+    build = genoInfo2build(genoInfo)
     dfCOV = dictCOV[CHR]
     dfSNV = dictSNV[CHR]
     # sliding window
@@ -315,10 +322,7 @@ def coverage_chr(dictCOV, dictSNV, CHR, genoInfo, gender, covWindow, dataType):
         START, END = df.loc[i,'START'], df.loc[i,'END']
         #print(START, END)
         covCount, covMean, covSEM = computeCOV(dfCOV, START, END, dataType)
-        # no snp suggests poor regions
         snpCount = ((dfSNV.POS>=START) & (dfSNV.POS<=END)).sum()
-        #if snpCount == 0:
-        #    covMean, covSEM = 0, 0 # keep 0 for plot coverage
         
         df.loc[i,'covCount'], df.loc[i,'covMean'], df.loc[i,'covSEM'] = covCount, covMean, covSEM
         df.loc[i,'snpCount'] = snpCount
@@ -326,26 +330,22 @@ def coverage_chr(dictCOV, dictSNV, CHR, genoInfo, gender, covWindow, dataType):
     # covSmooth
     if CHR == 'Y': # only 1 bin
         df['covSmooth'] = df['covMean']
-    # PAR2 will be smoothed
-    elif dataType == 'WGS' and gender == 'M' and CHR == 'X':
-        df['covSmooth'] = df['covMean']
     else:
-        df['covSmooth'] = df['covMean'].rolling(3,center=True).median()
+        df['covSmooth'] = df['covMean'].rolling(3,center=True).median()       
+    # PAR2 should not be smoothed
+    if gender == 'M' and CHR == 'X':
+        df.loc[df.index[-1], 'covSmooth'] = df.loc[df.index[-1], 'covMean']
+        
     df['plotSTART'] = df.START + genoInfo.loc[CHR, 'prevLen']
     df['plotEND'] = df.END + genoInfo.loc[CHR, 'prevLen']
     return df
 
 def coverage_genome(dictCOV, dictSNV, genoInfo, gender, dataType, chrY_status, covWindow=2e6):
     print("********** Working on coverage bins ... **********")
-
     dfCOV = pd.DataFrame()
     for CHR in dictCOV:
-        if CHR == 'Y' and gender == 'F':
-            print("Skipping chrY, because of female sample ...")
-            continue
-        elif CHR == 'Y' and chrY_status == 'Y_loss':
-            print("Skipping chrY, because of Y_loss ...")
-            continue
+        if CHR == 'Y' and chrY_status in ['no_Y']:
+            print("Skipping chrY, because of", chrY_status)
         else:
             #print("Preparing chr" + CHR + " ...")
             dfCOV = dfCOV.append(coverage_chr(dictCOV, dictSNV, CHR, genoInfo, gender, covWindow, dataType))
@@ -359,7 +359,7 @@ def PAR_Xpos(build):
         return [60001, 2699520], [154931044, 155260560]
     elif build=='hg38':
         return [10001, 2781479], [155701383, 156030895]
-
+    
 ################################################################
 # Circular Binary Segmentation (CBS)
 ################################################################
@@ -462,12 +462,12 @@ def validate(x, L, shuffles=1000, p=.01):
 ################################################################
 # segmentation function
 ################################################################
-def segmentation(dictSNV, CHR, genoInfo, workDir, START=0, END=1e9, dataCol='VAF'):
+def segmentation(dictSNV, CHR, genoInfo, workDir, START=0, END=1e9, dataCol='VAF', dataType='WGS'):
     #print('***** Working on '  + dataCol + ' segmentation for chr' + CHR + ' *****')
     dfData = dictSNV[str(CHR)]
     dfData = dfData[(dfData.POS>=START) & (dfData.POS<=END)].copy()
     if len(dfData) <= 10:
-        print('Too few data points for chr' + CHR + ' ...')
+        print('Too few data points (<=10) for chr' + CHR + ' ...')
         return pd.DataFrame(), [], pd.DataFrame()
     
     if dataCol == 'VAF':
@@ -481,15 +481,22 @@ def segmentation(dictSNV, CHR, genoInfo, workDir, START=0, END=1e9, dataCol='VAF
         dfData = dfData[dfData.MAF > 0].copy()
         dfData.reset_index(inplace=True)
         dfData.drop(['index'],axis=1,inplace=True)
+        # no heterozygotes
+        if len(dfData) <= 10:
+            print('Too few heterozygotes (<=10) for chr' + CHR + ' ...')
+            return pd.DataFrame(), [], pd.DataFrame()
         data = dfData.MAF.values
         Segments_folder = workDir + '/Segments_VAF'
         
     elif dataCol == 'ROH':
-        # use both upper and lower half to generate accurate breakpoints
-        upper = dfData[dfData.VAF>0.5].index
-        lower = dfData[dfData.VAF<=0.5].index
-        dfData.loc[upper, 'MAF'] = 1 - dfData.loc[upper, 'VAF']
-        dfData.loc[lower, 'MAF'] = dfData.loc[lower, 'VAF']
+        # %5 of tolerance
+        if dataType == 'WGS':
+            dfData['MAF'] = dfData['VAF'].rolling(100,center=True).apply(\
+                lambda x: (0.5 if ((x!=1) & (x!=0)).sum() >= 5 else 1), raw=True)
+        else:
+            dfData['MAF'] = dfData['VAF'].rolling(20,center=True).apply(\
+                lambda x: (0.5 if ((x!=1) & (x!=0)).sum() >= 2 else 1), raw=True)
+        dfData = dfData[dfData.MAF > 0].copy()
         dfData.reset_index(inplace=True)
         dfData.drop(['index'],axis=1,inplace=True)
         data = dfData.MAF.values
@@ -512,9 +519,9 @@ def segmentation(dictSNV, CHR, genoInfo, workDir, START=0, END=1e9, dataCol='VAF
     else:
         if os.path.exists(Segments_folder) == False:
             os.mkdir(Segments_folder)
-        #print('Generating segments for chr' + CHR + ' ...')
+        print('Generating segments for chr' + CHR + ' ...')
         L = segment(data)
-        #print('Validating segments for chr' + CHR + ' ...')
+        print('Validating segments for chr' + CHR + ' ...')
         # runs may return slightly different segments
         SV = validate(data, L)
         
@@ -557,6 +564,656 @@ def segmentation(dictSNV, CHR, genoInfo, workDir, START=0, END=1e9, dataCol='VAF
         dfData.drop(['index'],axis=1,inplace=True)
     
     return dfData, SV, dfSV
+
+################################################################
+# VAF segmentation for heterozygotes
+################################################################
+def segment_genome(dictSNV, gender, chrY_status, genoInfo, workDir, dataCol='VAF', dataType='WGS'):
+    print('*********', dataCol, 'segmentation ... *********')
+    dictMAF, dictSV, dictDfSV  = {},{},{}
+    build = genoInfo2build(genoInfo)
+    
+    for CHR in dictSNV:
+        #print('Working on segments for chr' + CHR + ' ...')
+        # no need to segment vaf for chrY
+        if CHR == 'Y':
+            #print('***** Skipping chrY *****')
+            dfMAF, SV, dfSV = pd.DataFrame(), np.nan, pd.DataFrame()
+        elif CHR == 'X' and gender == 'M':
+            # keep PAR1, while PAR2 is too small
+            [PAR1_S,PAR1_E] = PAR_Xpos(build)[0]
+            dfMAF, SV, dfSV = segmentation(dictSNV, CHR, genoInfo, workDir, PAR1_S, PAR1_E, dataCol, dataType)  
+        else:
+            dfMAF, SV, dfSV = segmentation(dictSNV, CHR, genoInfo, workDir, dataCol=dataCol, dataType=dataType)
+        dictMAF[CHR], dictSV[CHR], dictDfSV[CHR] = dfMAF, SV, dfSV
+    return dictMAF, dictSV, dictDfSV
+
+def segment_smooth(dfSNV, dfMAF, SV, dataType, minSize=1e5, minHet=30, dataCol='VAF'):
+    # WGS: median of snpCount_1Mb = 1136, hetCount_1Mb = 683, hetRatio = 0.6   
+    # To have enough heterozygotes for model fitting, min(minSize)=1e4, min(minHET)=10
+    # Due to off-target SNPs, minHET = minBins should be OK
+    minSize = np.max([1e4, minSize])
+    minHet  = np.max([10, minHet])
+    # VAFcutoff = 0.01 indicates 0.02 of cnLOH, 0.028 of Loss, or 0.062 of Gain
+    # VAFcutoff = 0.01 will generate a lot more sub segments
+    vafCutoff = 0.01
+    
+    # no segments due to no heterozygous SNP markers
+    if len(SV) == 0:
+        return pd.DataFrame(), [], pd.DataFrame()
+    
+    smoothed = False
+    round_num = 0
+    dfSmooth = pd.DataFrame()
+    while smoothed == False:
+        smoothed = True
+        round_num += 1
+        
+        # retrieve segment positions
+        df = pd.DataFrame([SV[:-1], SV[1:]], index=['BreakPt1','BreakPt2']).T       
+        dfPOS = dfMAF[['POS']]
+        # discard break points, because it is ambiguous which event it belongs to
+        df['BP1new'] = df.BreakPt1 + 1
+        df['BP2new'] = df.BreakPt2 - 1
+        df = pd.merge(df, dfPOS, left_on='BP1new', right_index=True, how='left')
+        df = pd.merge(df, dfPOS, left_on='BP2new', right_index=True, how='left')
+        
+        df['Round'] = round_num
+        df['mafCount'] = df.BreakPt2 - df.BreakPt1 - 1 # exlude both ends
+        df['minMCount'] = df.mafCount.rolling(window=2).min() # min maf/het count
+        df['SIZE'] = df.POS_y - df.POS_x # event size
+        df['minSIZE'] = df.SIZE.rolling(window=2).min() # min event size
+        
+        # compute metadata, such as mafMean
+        for i in df.index:
+            POS1 = df.loc[i,'POS_x']
+            POS2 = df.loc[i,'POS_y']
+            # median is more robust mean regarding outliers
+            df.loc[i,'mafMean'] = dfMAF[(dfMAF.POS>=POS1)&(dfMAF.POS<=POS2)].MAF.median()
+            df.loc[i,'mafSTD'] = dfMAF[(dfMAF.POS>=POS1)&(dfMAF.POS<=POS2)].MAF.std()
+            df.loc[i,'snpCount'] = ((dfSNV.POS >= POS1) & (dfSNV.POS <= POS2)).sum()
+            df.loc[i,'hetCount'] = ((dfMAF.POS >= POS1) & (dfMAF.POS <= POS2) & (dfMAF.MAF>0)).sum()
+            
+        df['meanDiff'], df['DROP'] = np.abs(df.mafMean.diff()), np.nan
+      
+        if round_num == 1:
+            maxSTD = df.mafSTD.mean() + 2*df.mafSTD.std()
+        
+        # one segment left or to begin with, such as germline samples
+        if len(df)==1:
+            df = df[['BreakPt1','BreakPt2','POS_x', 'POS_y','SIZE','snpCount', \
+                'mafCount', 'hetCount', 'mafMean','mafSTD','meanDiff']]
+            return dfSmooth, SV, df
+        
+        for i in df.index:
+            # vafCutoff for each row
+            vafCutoffRow = size2cutoff(vafCutoff, dataType, df.loc[i,'minSIZE'], df.loc[i,'minMCount'])
+            
+            # if dropped a previous row, need to skip this row
+            if i != 0 and df.loc[i-1,'DROP'] == df.loc[i-1,'DROP']:
+                continue 
+            
+            # drop small segments FIRST
+            if df.loc[i,'mafCount']<minHet or df.loc[i,'SIZE']<minSize:
+                smoothed = False
+                df.loc[i,'DROP'] = 'Small'
+                df.loc[i,'dropBP'] = drop_BP(df, i)
+            # similar mafMean with the previous segment
+            elif df.loc[i,'meanDiff'] < vafCutoffRow:
+                smoothed = False
+                df.loc[i,'DROP'] = 'mafMean'
+                df.loc[i,'dropBP'] = df.loc[i,'BreakPt1']        
+            # segments with excess of heterozygosity
+            elif df.loc[i,'mafCount'] > df.loc[i,'snpCount']*0.9 and dataCol=='VAF':
+                smoothed = False
+                df.loc[i,'DROP'] = 'EOH'
+                df.loc[i,'dropBP'] = drop_BP(df, i)
+            # large mafSTD indicates poor regions, but mafSTD of WES/cfDNA can be very big
+            elif dataType == 'WGS' and df.loc[i,'mafSTD'] > maxSTD and dataCol=='VAF' and df.loc[i,'SIZE']<minSize*10:
+                smoothed = False
+                df.loc[i,'DROP'] = 'mafSTD'
+                df.loc[i,'dropBP'] = drop_BP(df, i)
+            # too few SNP in WGS, probably a poor sequencing gap such as centromere
+            elif dataType=='WGS' and df.loc[i,'snpCount']/df.loc[i,'SIZE'] < 0.0002:
+                smoothed = False
+                df.loc[i,'DROP'] = 'Gap'
+                df.loc[i,'dropBP'] = drop_BP(df, i)
+                
+        # drop breakpoints from SV after going over df
+        if smoothed == False:
+            SV = [x for x in SV if x not in df.dropBP.values]
+        dfSmooth = pd.concat([dfSmooth, df], sort=True, ignore_index=True)
+
+    # to avoid return SV below
+    SVs = SV
+    dfSVs = df[['BreakPt1','BreakPt2','POS_x', 'POS_y','SIZE','snpCount', \
+                'mafCount', 'hetCount', 'mafMean','mafSTD','meanDiff']]
+
+    return dfSmooth, SVs, dfSVs
+
+def size2cutoff(vafCutoff, dataType, eventSize, mafCount):
+    # small segments are more likely to be merged
+    if dataType == 'WGS':
+        if eventSize > 1e7:     return vafCutoff
+        elif eventSize > 1e6:   return vafCutoff + 0.02
+        elif eventSize > 1e5:   return vafCutoff + 0.03
+        else: return vafCutoff + 0.04
+    else:
+        if mafCount > 400: return vafCutoff
+        if mafCount > 200: return vafCutoff + 0.01
+        elif mafCount > 100: return vafCutoff + 0.02
+        elif mafCount > 50: return vafCutoff + 0.03
+        else: return vafCutoff + 0.04
+
+def drop_BP(df, i, dataCol = 'mafMean'):
+    BreakPt1 = df.loc[i,'BreakPt1']
+    BreakPt2 = df.loc[i,'BreakPt2']
+    # first segment
+    if i == 0:
+        return BreakPt2
+    # last segment
+    elif i == df.index[-1]:
+        return BreakPt1
+    # combine it into the larger neighbor to minimize its side effects
+    else:
+        value1 = df.loc[i-1,dataCol]
+        value  = df.loc[i,dataCol]
+        value2 = df.loc[i+1,dataCol]
+        if value <= value1 and value <= value2:
+            if value1<value2:
+                return BreakPt1
+            else:
+                return BreakPt2
+        elif value >= value1 and value >= value2:
+            if value1<value2:
+                return BreakPt2
+            else:
+                return BreakPt1
+        else:
+            if abs(value - value1) < abs(value - value2):
+                return BreakPt1
+            else: 
+                return BreakPt2
+
+def smooth_genome(dictSNV, dictMAF, dictSV, gender, dataType, minSize, minHet, build, dataCol='VAF', PRINT=False):
+    print('********* ' + dataCol + ' segments smoothing ... *********')
+    dictSmooth, dictSVs, dictDfSVs = {},{},{}
+    for CHR in dictSNV:
+        if PRINT == True:
+            print('***** VAF segment smoothing for chr' + CHR + ' *****')
+        dfSNV, dfMAF, SV = dictSNV[CHR], dictMAF[CHR], dictSV[CHR]
+        
+        if CHR != 'Y': # no Y segments
+            dfSmooth, SVs, dfSVs = segment_smooth(dfSNV, dfMAF, SV, dataType, minSize, minHet, dataCol=dataCol)
+        
+        # handle X and Y separately
+        # no need to smooth Y in female, or no SNP markers
+        if (gender == 'F' and CHR == 'Y') or len(dfMAF) == 0:
+            dfSmooth, SVs, dfSVs = pd.DataFrame(), [], pd.DataFrame()
+        elif gender == 'M' and CHR == 'Y':
+            dfSmooth, SVs = np.nan, np.nan
+            dfSVs = pd.DataFrame([[0, 3e7]], columns=['POS_x','POS_y'])
+            dfSVs['snpCount'] = len(dfSNV)
+            dfSVs['hetCount'] = np.nan
+            dfSVs['mafMean'] = 0
+            dfSVs['mafSTD'] = np.nan
+        elif gender == 'M' and CHR == 'X':  
+            POS_xy = []
+            [PAR1_S,PAR1_E] = PAR_Xpos(build)[0]
+            [PAR2_S,PAR2_E] = PAR_Xpos(build)[1]
+            for i in dfSVs.index:
+                if dfSVs.loc[i,'POS_y'] < PAR1_E:
+                    POS_xy.append([dfSVs.loc[i,'POS_x'], dfSVs.loc[i,'POS_y']])
+                elif dfSVs.loc[i,'POS_x'] < PAR1_E:
+                    POS_xy.append([dfSVs.loc[i,'POS_x'], PAR1_E])
+            POS_xy.append([PAR1_E, PAR2_S])
+            POS_xy.append([PAR2_S, PAR2_E])
+                
+            # replace dfSVs
+            dfSVs = pd.DataFrame(POS_xy, columns=['POS_x','POS_y'])
+            dfSVs['BreakPt1'] = 'np.nan'
+            dfSVs['BreakPt2'] = 'np.nan'
+
+            for i in dfSVs.index:
+                POS1 = dfSVs.loc[i,'POS_x']
+                POS2 = dfSVs.loc[i,'POS_y']
+                dfSVs.loc[i,'snpCount'] = ((dfSNV.POS >= POS1) & (dfSNV.POS <= POS2)).sum()
+                dfSVs.loc[i,'hetCount'] = ((dfMAF.POS >= POS1) & (dfMAF.POS <= POS2)).sum()
+                MAFs = dfMAF[(dfMAF.POS >= POS1) & (dfMAF.POS <= POS2)].MAF.values
+                if len(MAFs) >= 3:
+                    dfSVs.loc[i,'mafMean'] = np.mean(MAFs)
+                    dfSVs.loc[i,'mafSTD'] = np.std(MAFs)
+                else: # For example, WES has no heterozygotes
+                    dfSVs.loc[i,'mafMean'], dfSVs.loc[i,'mafSTD'] = np.nan, np.nan
+            # samll sub-segments
+            #dfSVs = dfSVs[dfSVs.covCount > 10]
+            
+        dictSmooth[CHR] = dfSmooth
+        dictSVs[CHR] = SVs
+        dictDfSVs[CHR] = dfSVs
+        
+    return dictSmooth, dictSVs, dictDfSVs
+
+################################################################
+# Merge VAF and ROH segments
+################################################################
+def merge_VAF_ROH(dictSNV, dictMAF, dictDfSVs, dictDfSVs_ROH, CHR, minSize, minBins):
+    dfSNV = dictSNV[CHR]
+    dfMAF = dictMAF[CHR]
+    dfSVs = dictDfSVs[CHR]
+    dfSVs_ROH = dictDfSVs_ROH[CHR]
+    
+    # no VAF segments, such as chrY
+    if dfSVs.empty:
+        return dfSVs
+
+    # dfROH
+    dfROH = dfSVs_ROH[dfSVs_ROH.mafMean == 1].copy() 
+    
+    # no ROH events
+    if dfROH.empty:
+        return dfSVs
+    
+    print('Found ROH event(s) on chr' + CHR + '...')
+    
+    BP = list(dfSVs.POS_x.values)+list(dfSVs.POS_y.values) + list(dfROH.POS_x.values) + list(dfROH.POS_y.values)
+    for i in dfSVs.index:
+        START1, END1 = dfSVs.loc[i, 'POS_x'], dfSVs.loc[i, 'POS_y']
+        for j in dfROH.index:
+            START2, END2 = dfROH.loc[j, 'POS_x'], dfROH.loc[j, 'POS_y']
+            # With intersection, remove VAF breakpoint(s)
+            if START2 <= START1 <= END2:
+                BP.remove(START1)
+            if START2 <= END1 <= END2:
+                BP.remove(END1)
+    SVs = np.sort(BP)
+    df = pd.DataFrame([SVs[:-1], SVs[1:]], index=['POS_x','POS_y']).T
+    df['SIZE'] = df.POS_y - df.POS_x
+    
+    for i in df.index:
+        POS1, POS2 = df.loc[i, 'POS_x'], df.loc[i, 'POS_y']
+        df.loc[i,'snpCount'] = ((dfSNV.POS >= POS1) & (dfSNV.POS <= POS2)).sum()  
+        df.loc[i,'mafCount'] = ((dfMAF.POS >= POS1) & (dfMAF.POS <= POS2)).sum() 
+        df.loc[i,'mafMean'] = dfMAF[(dfMAF.POS>=POS1)&(dfMAF.POS<=POS2)].MAF.mean()
+        df.loc[i,'mafSTD'] = dfMAF[(dfMAF.POS>=POS1)&(dfMAF.POS<=POS2)].MAF.std()
+    # drop breakpoints and gaps
+    df = df[(df.SIZE > minSize) & (df.snpCount > minBins)]
+    
+    return df
+
+def merge_genome(dictSNV, dictMAF, dictDfSVs, dictDfSVs_ROH, minSize, minBins):
+    print('********* Merging VAF and ROH segments ... *********')
+    dictDfSVs_Merged = {}
+    for CHR in dictDfSVs:
+        #print('Working on chr' + CHR + ' ...')
+        dictDfSVs_Merged[CHR] = merge_VAF_ROH(dictSNV, dictMAF, dictDfSVs, dictDfSVs_ROH, CHR, minSize, minBins)
+    return dictDfSVs_Merged
+
+################################################################
+# SubChrom algorithm
+################################################################
+
+# model for one normal distribution
+def OneNorm(x,mean,sd):
+    w = sts.norm.cdf(x,mean,sd)
+    return w
+
+# model for two normal distributions
+# 'mean' is the mean value of the distribution
+# 'frac' is the fraction of 1 distribution, as the two separate distributions are not necessarty the same
+# 'vafMean' is the mean value of all vaf data
+def TwoNorm(x,mean,sd,frac,vafMean):
+    w = frac*sts.norm.cdf(x,mean,sd) + (1-frac)*sts.norm.cdf(x,vafMean*2-mean,sd)
+    return w
+
+# fit data into two models
+def fitModel(dfSNV, START, END, mafMean, mafSTD, vafMeanGenome):
+    # vafCount, vafMean, oneMean, oneSTD, oneProb, twoMeanUp, twoMeanDown, twoSTD, twoProb, vafEvent
+    df = dfSNV[(dfSNV.POS>=START) & (dfSNV.POS<=END)].copy()
+    snpCount = len(df)
+    df = df[(df.VAF > 0) & (df.VAF < 1)] # remove homozygotes
+    vafCount = len(df)
+    vafMean = df.VAF.mean()
+    
+    # too few heterozygotes
+    if vafCount <= snpCount/25:
+        return [vafCount, 0.5, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, 'ROH']
+    
+    # clearly TwoNorm, fit into OneNorm model, which returns accurate vafMean
+    if mafMean < 0.2:
+        if (df.VAF > 0.5).sum() >= (df.VAF < 0.5).sum():
+            df = df[df.VAF > 0.5]
+        else:
+            df = df[df.VAF < 0.5]
+        try:    
+            popt1, pcov1 = opt.curve_fit(OneNorm,np.sort(df.VAF.values),
+                               np.linspace(0,1,len(df)),p0=[0.9, 0.1])
+            twoMean = round(popt1[0],6)
+            twoMeanUp = np.max([twoMean, 1-twoMean])
+            twoMeanDown = np.min([twoMean, 1-twoMean])
+            twoSTD = round(popt1[1],6)
+            return [vafCount, vafMean, np.nan, np.nan, 0, \
+                    twoMeanUp, twoMeanDown, twoSTD, 1, 'TwoNorm']
+        except:
+            return [vafCount, 0.5, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, 'ROH']
+    
+    # detecting subclonal events. NOT working well for cfDNA WGS, because VAF is dispearsed
+    #if mafMean > 0.43:
+        # remove lowMAF SNV to improve model fitting
+    #    df = df[(df.VAF >= 0.2) & (df.VAF <= 0.8)]
+
+    # OneNorm
+    try:
+        popt1, pcov1 = opt.curve_fit(OneNorm, np.sort(df.VAF.values), 
+                                     np.linspace(0,1,len(df)),p0=[0.5, 0.1])
+        oneMean = round(popt1[0],6)
+        oneSTD = round(popt1[1],6)
+        oneProb = sts.kstest(df.VAF.values, OneNorm, args=popt1)[1]
+    except:
+        oneMean,oneSTD,oneProb = vafMeanGenome, np.nan, -1
+    
+    # unbalanced VAF distribution, oneMean can't be > 0.5
+    if oneMean > 0.501 or oneMean < vafMeanGenome/1.05: # add some noise
+        print('Unbalanced VAF oneMean on chr'+dfSNV.iloc[0,0]+':', oneMean, "vafMeanGenome:", vafMeanGenome)
+        try:
+            popt1, pcov1 = opt.curve_fit(lambda x, sd: OneNorm(x, vafMeanGenome, sd), np.sort(df.VAF.values), 
+                                             np.linspace(0,1,len(df)),p0=[0.1])
+            oneMean = vafMeanGenome
+            oneSTD = round(popt1[0],6)
+            oneProb = sts.kstest(df.VAF.values, OneNorm, args=[vafMeanGenome, popt1])[1]
+        except:
+            oneMean,oneSTD,oneProb = vafMeanGenome, np.nan, -1
+    
+    # TwoNorm
+    try:
+        popt2, pcov2 = opt.curve_fit(lambda x,mean,sd,frac: TwoNorm(x,mean,sd,frac,oneMean),
+                                    np.sort(df.VAF.values),np.linspace(0,1,len(df)),p0=[0.3,0.1,0.5])
+        twoMean = round(popt2[0],6)
+        if twoMean > oneMean:
+            twoMeanUp = twoMean
+            twoMeanDown = oneMean * 2 - twoMeanUp
+        else:
+            twoMeanDown = twoMean
+            twoMeanUp = oneMean * 2 - twoMeanDown
+        twoSTD = round(popt2[1],6)
+        twoProb = sts.kstest(df.VAF.values, TwoNorm, args=np.append(popt2, oneMean))[1]
+    except:
+        # small failed events: very likely not normal distribution at all, and thus poor regions
+        # large failed events: very likely fit into one normal distribution only
+        return [vafCount, vafMean, oneMean, oneSTD, oneProb, \
+                np.nan, np.nan, np.nan, -1, 'OneNorm']
+  
+    # compare two models
+    # TwoNorm fits better, adding some noise
+    if oneProb <= twoProb/1.05 and oneSTD > twoSTD:
+        vafEvent = 'TwoNorm'
+    # both fit similar & TwoNorm STD is smaller
+    elif oneProb/1.1 <= twoProb and oneSTD/1.1 > twoSTD:
+        vafEvent = 'TwoNorm'
+
+    else:
+        vafEvent = 'OneNorm'
+    return [vafCount, vafMean, oneMean, oneSTD, oneProb, twoMeanUp, twoMeanDown, twoSTD, twoProb, vafEvent]  
+    
+def subchrom_chr(dictSNV, dictCOV, dfCOV, dictDfSVs, CHR, vafMeanGenome, dataType):
+    # working dataframe of chr
+    CHR = str(CHR)
+    dfCHR = dictSNV[CHR]
+    dfSVs = dictDfSVs[CHR]
+    dfCOVCHR = dictCOV[CHR]
+    dfCOVbin = dfCOV[dfCOV.CHR == CHR]
+    EVENTS = []
+    for i in dfSVs.index:
+        START, END = dfSVs.loc[i, 'POS_x'], dfSVs.loc[i, 'POS_y']
+        mafMean, mafSTD = dfSVs.loc[i, 'mafMean'], dfSVs.loc[i, 'mafSTD']
+        # compute coverage
+        snpCount, covMean, covSEM = computeCOV(dfCHR, START, END, dataType)
+        # to avoid local sequencing, such as chr14q
+        if END-START > 2e7:
+            covCountCOV1, covMean1, covSEM1 = computeCOV(dfCOVbin, START, END, dataType)
+            covCountCOV2, covMean2, covSEM2 = computeCOV(dfCOVCHR, START, END, dataType)
+            if covSEM1 > covSEM2:
+                covCountCOV, covMean, covSEM = covCountCOV2, covMean2, covSEM2
+            else:
+                covCountCOV, covMean, covSEM = covCountCOV1, covMean1, covSEM1
+        else: 
+            covCountCOV, covMean, covSEM = computeCOV(dfCOVCHR, START, END, dataType)
+        # compute vaf
+        if CHR != 'Y':
+            vafEvent = fitModel(dfCHR, START, END, mafMean, mafSTD, vafMeanGenome)
+        else:
+            vafEvent = [np.nan, 0.5, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, 'Y']
+        EVENTS.append([CHR, START, END, END-START, snpCount, covMean, covSEM, mafMean, mafSTD] + vafEvent) 
+    df = pd.DataFrame(EVENTS, 
+            columns=['CHR', 'START', 'END', 'SIZE', 'snpCount', 'covMean', 'covSEM',
+                     'mafMean', 'mafSTD',
+                     'vafCount', 'vafMean', 'oneMean', 'oneSTD', 'oneProb', 
+                     'twoMeanUp', 'twoMeanDown', 'twoSTD', 'twoProb', 'vafEvent'])
+    return df
+
+def subchrom_genome(dictSNV, dictCOV, dfCOV, dictDfSVs, genoInfo, chrY_status, dataType):
+    print('********** Model fitting for VAF segments **********')
+    final = pd.DataFrame()
+    for CHR in dictSNV:
+        #print('***** fitModel for chr' + CHR + ' *****')
+        # no need to fit chrY
+        if CHR=='Y' and chrY_status in ['no_Y']:
+            continue
+        vafMeanGenome = genoInfo.vafMeanCHR.median()
+        df = subchrom_chr(dictSNV, dictCOV, dfCOV, dictDfSVs, CHR, vafMeanGenome, dataType)
+        final = final.append(df)
+    final.reset_index(inplace=True)
+    final.drop('index',axis=1,inplace=True)
+    return final
+
+################################################################
+# Diploid depth
+################################################################
+def depth(dictSNV, dataType, depthMode):
+    if depthMode == 'auto': # consider all autosomes
+        meanCovChr = []
+        for CHR in range(1,23):
+            dfSNV = dictSNV[str(CHR)]
+            covCount, covMean, covSEM = computeCOV(dfSNV, 1, dfSNV.POS.max(), dataType)
+            meanCovChr.append(covMean)
+        return np.median(meanCovChr)
+    else:
+        CHR = str(depthMode) # consider a specific chromosome, such as 7
+        dfSNV = dictSNV[str(CHR)]
+        covCount, covMean, covSEM = computeCOV(dfSNV, 1, dfSNV.POS.max(), dataType)
+        return covMean
+    
+def diploidDepth(dictCOV, vafSeg, dataType, dipDep):
+    print("********** Optimizing diploid depth ... **********")
+    print("Input diploid mode:", dipDep)
+    
+    # handle both str and int
+    try:
+        return int(dipDep)  # Try to convert to int
+    except ValueError:
+        if dipDep in ["chr1","chr2","chr3","chr4","chr5","chr6","chr7","chr8","chr9","chr10",\
+                      "chr11","chr12","chr13","chr14","chr15","chr16","chr17","chr18","chr19","chr20",
+                      "chr21","chr22","chrX"]:
+            dipDep = dipDep[3:]
+        elif 'chr' in str(dipDep):
+            print('Not supported chromosome:', dipDep)
+            dipDep = 'auto'
+        elif dipDep == 'auto':
+            dipDep = 'auto'
+        else:
+            print('Not supported chromosome:', dipDep)
+            dipDep = 'auto'
+
+        if dipDep == 'auto':
+            OneNormSeg = vafSeg[vafSeg.vafEvent == 'OneNorm']
+            if len(OneNormSeg) >= 3:
+                seqDepth = OneNormSeg.covMean.median()
+            else:
+                seqDepth = depth(dictCOV, dataType, 'auto')
+        else:
+            seqDepth = depth(dictCOV, dataType, dipDep)
+        print('Final diploid mode:', dipDep)
+        print('SeqDepth:', seqDepth)
+        return seqDepth
+    
+################################################################
+# Post process VAF events
+################################################################
+def coverageEvent(seqDepth, coverage, gender='F', CHR='1', minTF=0.05):
+    if gender == 'M' and CHR in ['X', 'Y']:
+        covFrac = round((coverage - 0.5 * seqDepth) / (0.5 * seqDepth),5)
+        log2ratio = round(np.log2(coverage / (0.5 * seqDepth)), 5)
+    else:
+        covFrac = round((coverage - seqDepth) / (0.5 * seqDepth),5)
+        log2ratio = round(np.log2(coverage / seqDepth), 5)
+        
+    if coverage == 0: # uncovered regions
+        covEvent = 'NoCoverage'
+        covFrac = 0
+    elif covFrac <= -minTF:
+        covEvent = 'Loss'
+    elif covFrac >=  minTF:
+        covEvent = 'Gain'
+    else:
+        covEvent = 'Diploid'        
+    return covEvent, covFrac, log2ratio
+
+# VAF to cell fraction conversion function        
+def VAFtoFrac(vafMean, mode='Diploid'):
+    lowerMean = np.min([vafMean, 1-vafMean])
+    if mode=='Diploid':
+        return 1 - lowerMean*2
+    elif mode == 'Loss':
+        return (lowerMean - 0.5) / (0.5*lowerMean - 0.5) # OneLoss
+    elif mode == 'Gain':
+        return 1/lowerMean -2 # OneGain
+
+def VAFtoAB(seqDepth, covMean, vafMean):
+    # x gain of chrA , y gain of chrB
+    # seqDepth * 'x' + seqDepth * 'y' = 2*(covMean-seqDepth)
+    # (1-vafMean) * 'x' - vafMean * 'y' = 2*vafMean - 1
+    left  = [[seqDepth, seqDepth],[1-vafMean, -vafMean]]
+    right = [2*(covMean-seqDepth), 2*vafMean-1]
+    results = np.linalg.solve(left, right)
+    chrA_freq = round(results[0], 3)
+    chrB_freq = round(results[1], 3)
+    return (chrA_freq, chrB_freq) if chrA_freq<chrB_freq else (chrB_freq, chrA_freq)
+
+def vafEVENTS(vafSeg, dictSNV, genoInfo, seqDepth, gender, dataType, minTF):
+    print('********** Post processing VAF events ... **********')
+    # exclude no coverage regions, probably due to off-target SNPs 
+    #df = vafSeg[((vafSeg.vafEvent == 'TwoNorm') | (vafSeg.vafEvent == 'ROH')) & (vafSeg.covMean != 0)].copy()
+    df = vafSeg[(vafSeg.covMean != 0)].copy()
+    
+    build = genoInfo2build(genoInfo)
+    [PAR1_S,PAR1_E], [PAR2_S,PAR2_E] = PAR_Xpos(build)
+
+    if len(df) == 0:
+        return pd.DataFrame([], columns=['CHR', 'START', 'END', 'SIZE', 'covMean',
+       'covEvent', 'log2ratio', 'cnvEvent', 'vafEvent', 'vafFrac',
+       'vaf_cov_Ratio', 'chrA_num', 'chrA_freq', 'chrB_num', 'chrB_freq'])
+    
+    df['chrA_num'], df['chrA_freq'], df['chrB_num'], df['chrB_freq'] = np.nan, np.nan, np.nan, np.nan
+    
+    for i in df.index:
+        CHR = df.loc[i,'CHR']
+        # segments are autosomes, PAR, XY
+        if gender == 'M' and CHR=='X' and (df.loc[i, 'END']<=PAR1_E or df.loc[i, 'START']>=PAR2_S):
+            covEvent, covFrac, log2ratio = coverageEvent(seqDepth, df.loc[i,'covMean'], gender, 'PAR', minTF)     
+        else:
+            covEvent, covFrac, log2ratio = coverageEvent(seqDepth, df.loc[i,'covMean'], gender, CHR, minTF)
+        df.loc[i,'covEvent'], df.loc[i,'covFrac'], df.loc[i,'log2ratio'] = covEvent, covFrac, log2ratio
+        
+        # vaf evetns
+        vafShift = 0.5 - (df.loc[i,'twoMeanUp'] + df.loc[i,'twoMeanDown'])/2
+        vafMeanNEW = df.loc[i,'twoMeanDown'] + vafShift
+        vafFrac = VAFtoFrac(vafMeanNEW, covEvent)
+        df.loc[i,'cnvEvent'] = df.loc[i,'covEvent']
+        df.loc[i,'vafFrac'] = vafFrac
+        if covFrac != covFrac or covFrac == 0 or vafFrac != vafFrac: # not covered
+            vaf_cov_Ratio = 1
+        else:
+            vaf_cov_Ratio = abs(vafFrac/covFrac)
+        df.loc[i,'vaf_cov_Ratio'] = vaf_cov_Ratio
+        
+        # chrA, chrB, cnvEvent
+        if df.loc[i, 'vafEvent'] == 'OneNorm':
+            if covEvent == 'Diploid':
+                continue
+            elif covEvent == 'Gain':
+                df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 1, np.nan
+                df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1 + covFrac, covFrac
+            else: # Loss
+                df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 1, np.nan 
+                df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1 + covFrac, covFrac
+                
+        elif df.loc[i, 'vafEvent'] == 'ROH':
+            if gender == 'M' and df.loc[i,'CHR'] in ['X','Y']:
+                df.loc[i, 'vafEvent'] = 'maleXY'
+                if covEvent == 'Diploid':
+                    df.loc[i,'cnvEvent'] = 'cnLOH'
+                    df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 0, np.nan
+                    df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1, np.nan
+                else:
+                    df.loc[i,'cnvEvent'] = covEvent
+                    df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 0, np.nan
+                    df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1+covFrac, abs(covFrac)
+            elif df.loc[i, 'covMean'] < seqDepth*0.7:
+                df.loc[i,'cnvEvent'] = 'Loss'
+                df.loc[i,'vafFrac'] = 1
+                df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 1, np.nan
+                df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 0, 1
+            else:
+                df.loc[i,'cnvEvent'] = 'cnLOH'
+                df.loc[i,'vafFrac'] = 1
+                df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 0, np.nan
+                df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 2, 1
+                
+        else: # TwoNorm
+            if covEvent == 'Diploid': # cn_LOH
+                df.loc[i,'cnvEvent'] = 'cnLOH'
+                df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 1-vafFrac, -vafFrac
+                df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1+vafFrac, vafFrac
+            elif covEvent == 'Gain':
+                if vaf_cov_Ratio < 0.7 or vaf_cov_Ratio > 1.43:
+                    chrA_gain, chrB_gain = VAFtoAB(seqDepth, df.loc[i,'covMean'], vafMeanNEW)
+                    df.loc[i,'cnvEvent'] = 'complexGain'
+                    df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 1+chrA_gain, chrA_gain
+                    df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1+chrB_gain, chrB_gain
+                else:
+                    df.loc[i,'cnvEvent'] = covEvent
+                    df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 1, np.nan
+                    df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1 + vafFrac, vafFrac
+            else: # Loss
+                if vaf_cov_Ratio < 0.7 or vaf_cov_Ratio > 1.43 :
+                    chrA_gain, chrB_gain = VAFtoAB(seqDepth, df.loc[i,'covMean'], vafMeanNEW)
+                    df.loc[i,'cnvEvent'] = 'complexLoss'
+                    df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 1+chrA_gain, chrA_gain
+                    df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1+chrB_gain, chrB_gain
+                else:
+                    df.loc[i,'cnvEvent'] = covEvent
+                    df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 1, np.nan 
+                    df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1 - vafFrac, -vafFrac
+    
+    df = df[['CHR', 'START', 'END', 'SIZE', 'covMean',
+       'covEvent', 'covFrac', 'log2ratio', 'cnvEvent', 'vafEvent', 'vafFrac',
+       'vaf_cov_Ratio', 'chrA_num', 'chrA_freq', 'chrB_num', 'chrB_freq']]
+    
+    # remove lowFrac cnLOH
+    LOWcnLOH = ((df.cnvEvent == 'cnLOH') & (df.chrB_freq < 0.08))
+    df = df[~LOWcnLOH]
+    
+    # remove germline cnLOH
+    cnLOH = df[(df.cnvEvent == 'cnLOH') & (df.vafEvent == 'ROH')]
+    for i in cnLOH.index:
+        CHR = cnLOH.loc[i, 'CHR']
+        CHRevents = df[df.CHR == CHR]
+        # cnLOH is not the first and the last event, most likely germline events
+        if i != CHRevents.index[0] and i != CHRevents.index[-1]:
+            df.drop(i, axis=0, inplace=True)
+
+    TwoNorms = (df.vafEvent == 'TwoNorm')|(df.vafEvent == 'ROH')
+    return df[TwoNorms], df[(~TwoNorms)&(df.covEvent != 'Diploid')]
 
 ################################################################
 # coverage segmentation
@@ -604,36 +1261,6 @@ def size2cutoff_COV(dataType, eventSize, covCount):
         elif covCount > 100: return 0.15
         elif covCount > 50: return 0.2
         else: return 0.3
-        
-def drop_BP(df, i, dataCol = 'mafMean'):
-    BreakPt1 = df.loc[i,'BreakPt1']
-    BreakPt2 = df.loc[i,'BreakPt2']
-    # first segment
-    if i == 0:
-        return BreakPt2
-    # last segment
-    elif i == df.index[-1]:
-        return BreakPt1
-    # combine it into the larger neighbor to minimize its side effects
-    else:
-        value1 = df.loc[i-1,dataCol]
-        value  = df.loc[i,dataCol]
-        value2 = df.loc[i+1,dataCol]
-        if value <= value1 and value <= value2:
-            if value1<value2:
-                return BreakPt1
-            else:
-                return BreakPt2
-        elif value >= value1 and value >= value2:
-            if value1<value2:
-                return BreakPt2
-            else:
-                return BreakPt1
-        else:
-            if abs(value - value1) < abs(value - value2):
-                return BreakPt1
-            else: 
-                return BreakPt2
     
 def segment_smooth_COV(dfMAF, SV, dataType, maxSEM, minSize=1e5, minBins=30):
     # To have enough heterozygotes for model fitting, min(minSize)=1e4, min(minBins)=10
@@ -697,6 +1324,11 @@ def segment_smooth_COV(dfMAF, SV, dataType, maxSEM, minSize=1e5, minBins=30):
                 smoothed = False
                 df.loc[i,'DROP'] = 'covMean'
                 df.loc[i,'dropBP'] = df.loc[i,'BreakPt1']
+            # too few SNP in WGS, probably a poor sequencing gap such as centromere
+            elif dataType=='WGS' and df.loc[i,'covCount']/df.loc[i,'SIZE'] < 0.0002:
+                smoothed = False
+                df.loc[i,'DROP'] = 'Gap'
+                df.loc[i,'dropBP'] = drop_BP(df, i, dataCol='covMean')
             # focal events such as mycn amplifcation may have high SEM
             #elif df.loc[i,'covSEM'] > maxSEM:
             #    smoothed = False
@@ -714,7 +1346,7 @@ def segment_smooth_COV(dfMAF, SV, dataType, maxSEM, minSize=1e5, minBins=30):
     
     return dfSmooth, SVs, dfSVs
 
-def smooth_genome_COV(dictMAF, dictSV, dictDfSV, gender, dataType, minSize, minBins):
+def smooth_genome_COV(dfCOV, dictMAF, dictSV, dictDfSV, gender, dataType, minSize, minBins):
     # No normalization
     if dictMAF == {}:
         return {},{},{}
@@ -739,8 +1371,15 @@ def smooth_genome_COV(dictMAF, dictSV, dictDfSV, gender, dataType, minSize, minB
         # no need to smooth chrY
         elif gender == 'M' and CHR == 'Y':
             dfSmooth, SVs = pd.DataFrame(), []
-            dfSVs = pd.DataFrame([[0, 3e7, 3e7, len(dictMAF['Y']), 0, np.nan]], 
-                                 columns=['POS_x','POS_y', 'SIZE','covCount', 'covMean', 'covSEM'])
+            rowY = dfCOV[dfCOV.CHR == 'Y']
+            if len(rowY) == 0:
+                dfSVs = pd.DataFrame([[0, 3e7, 3e7, 0, -1, np.nan]], 
+                                     columns=['POS_x','POS_y', 'SIZE','covCount', 'covMean', 'covSEM'])
+            else:
+                rowY = dfCOV[dfCOV.CHR == 'Y'].index[0]
+                log2Y = np.log2(dfCOV.loc[rowY, 'covMean'])
+                dfSVs = pd.DataFrame([[0, 3e7, 3e7, len(dictMAF['Y']), log2Y, np.nan]], 
+                                     columns=['POS_x','POS_y', 'SIZE','covCount', 'covMean', 'covSEM'])
         else:
             dfMAF = dictMAF[CHR]
             SV = dictSV[CHR]
@@ -751,556 +1390,6 @@ def smooth_genome_COV(dictMAF, dictSV, dictDfSV, gender, dataType, minSize, minB
         dictDfSVs[CHR] = dfSVs
         
     return dictSmooth, dictSVs, dictDfSVs
-
-################################################################
-# VAF segmentation for heterozygotes
-################################################################
-def segment_genome(dictSNV, gender, genoInfo, workDir, dataCol='VAF'):
-    print('*********', dataCol, 'segmentation ... *********')
-    dictMAF, dictSV, dictDfSV  = {},{},{}
-    # build
-    if genoInfo.loc['1', 'chrSize'] == 249250621:
-        build = 'hg19'
-    elif genoInfo.loc['1', 'chrSize'] == 248956422:
-        build = 'hg38'
-    
-    for CHR in dictSNV:
-        # no need to segment vaf for chrY
-        if CHR == 'Y':
-            #print('***** Skipping chrY *****')
-            dfMAF, SV, dfSV = pd.DataFrame(), np.nan, pd.DataFrame()
-        elif CHR == 'X' and gender == 'M':
-            [PAR1_S,PAR1_E] = PAR_Xpos(build)[0]
-            # keep PAR1, while PAR2 is too small
-            dfMAF, SV, dfSV = segmentation(dictSNV, CHR, genoInfo, workDir, PAR1_S, PAR1_E, dataCol)  
-        else:
-            dfMAF, SV, dfSV = segmentation(dictSNV, CHR, genoInfo, workDir, dataCol=dataCol)
-        dictMAF[CHR], dictSV[CHR], dictDfSV[CHR] = dfMAF, SV, dfSV
-    return dictMAF, dictSV, dictDfSV
-
-def segment_smooth(dfSNV, dfMAF, SV, dataType, minSize=1e5, minHet=30):
-    # WGS: median of snpCount_1Mb = 1136, hetCount_1Mb = 683, hetRatio = 0.6   
-    # To have enough heterozygotes for model fitting, min(minSize)=1e4, min(minHET)=10
-    # Due to off-target SNPs, minHET = minBins should be OK
-    minSize = np.max([1e4, minSize])
-    minHet  = np.max([10, minHet])
-    # VAFcutoff = 0.01 indicates 0.02 of cnLOH, 0.028 of Loss, or 0.062 of Gain
-    # VAFcutoff = 0.01 will generate a lot more sub segments
-    vafCutoff = 0.01
-        
-    smoothed = False
-    round_num = 0
-    dfSmooth = pd.DataFrame()
-    while smoothed == False:
-        smoothed = True
-        round_num += 1
-        
-        # retrieve segment positions
-        df = pd.DataFrame([SV[:-1], SV[1:]], index=['BreakPt1','BreakPt2']).T       
-        dfPOS = dfMAF[['POS']]
-        # discard break points, because it is ambiguous which event it belongs to
-        df['BP1new'] = df.BreakPt1 + 1
-        df['BP2new'] = df.BreakPt2 - 1
-        df = pd.merge(df, dfPOS, left_on='BP1new', right_index=True, how='left')
-        df = pd.merge(df, dfPOS, left_on='BP2new', right_index=True, how='left')
-        
-        df['Round'] = round_num
-        df['mafCount'] = df.BreakPt2 - df.BreakPt1 - 1 # exlude both ends
-        df['minMCount'] = df.mafCount.rolling(window=2).min() # min maf/het count
-        df['SIZE'] = df.POS_y - df.POS_x # event size
-        df['minSIZE'] = df.SIZE.rolling(window=2).min() # min event size
-        
-        # compute metadata, such as mafMean
-        for i in df.index:
-            POS1 = df.loc[i,'POS_x']
-            POS2 = df.loc[i,'POS_y']
-            # median is more robust mean regarding outliers
-            df.loc[i,'mafMean'] = dfMAF[(dfMAF.POS>=POS1)&(dfMAF.POS<=POS2)].MAF.median()
-            df.loc[i,'mafSTD'] = dfMAF[(dfMAF.POS>=POS1)&(dfMAF.POS<=POS2)].MAF.std()
-            df.loc[i,'snpCount'] = ((dfSNV.POS >= POS1) & (dfSNV.POS <= POS2)).sum()
-            df.loc[i,'hetCount'] = ((dfMAF.POS >= POS1) & (dfMAF.POS <= POS2) & (dfMAF.MAF>0)).sum()
-            
-        df['meanDiff'], df['DROP'] = np.abs(df.mafMean.diff()), np.nan
-      
-        if round_num == 1:
-            maxSTD = df.mafSTD.mean() + 2*df.mafSTD.std()
-        
-        # one segment left or begin with, such as germline samples
-        if len(df)==1:
-            df = df[['BreakPt1','BreakPt2','POS_x', 'POS_y','SIZE','snpCount', \
-                'mafCount', 'hetCount', 'mafMean','mafSTD','meanDiff']]
-            return dfSmooth, SV, df
-        
-        for i in df.index:
-            # vafCutoff for each row
-            vafCutoffRow = size2cutoff(vafCutoff, dataType, df.loc[i,'minSIZE'], df.loc[i,'minMCount'])
-            
-            # if dropped a previous row, need to skip this row
-            if i != 0 and df.loc[i-1,'DROP'] == df.loc[i-1,'DROP']:
-                continue 
-            
-            # drop small segments FIRST
-            if df.loc[i,'mafCount']<minHet or df.loc[i,'SIZE']<minSize:
-                smoothed = False
-                df.loc[i,'DROP'] = 'Small'
-                df.loc[i,'dropBP'] = drop_BP(df, i)
-            # similar mafMean with the previous segment
-            elif df.loc[i,'meanDiff'] < vafCutoffRow:
-                smoothed = False
-                df.loc[i,'DROP'] = 'mafMean'
-                df.loc[i,'dropBP'] = df.loc[i,'BreakPt1']        
-            # segments with excess of heterozygosity
-            elif df.loc[i,'mafCount'] > df.loc[i,'snpCount']*0.9:
-                smoothed = False
-                df.loc[i,'DROP'] = 'EOH'
-                df.loc[i,'dropBP'] = drop_BP(df, i)
-            # large mafSTD indicates poor regions, but mafSTD of WES/cfDNA can be very big
-            elif dataType == 'WGS' and df.loc[i,'mafSTD'] > maxSTD:
-                smoothed = False
-                df.loc[i,'DROP'] = 'mafSTD'
-                df.loc[i,'dropBP'] = drop_BP(df, i)
-            # too few SNP in WGS, probably a poor sequencing gap such as centromere
-            elif dataType=='WGS' and df.loc[i,'snpCount']/df.loc[i,'SIZE'] < 0.0002:
-                smoothed = False
-                df.loc[i,'DROP'] = 'Gap'
-                df.loc[i,'dropBP'] = drop_BP(df, i)
-                
-        # drop breakpoints from SV after going over df
-        if smoothed == False:
-            SV = [x for x in SV if x not in df.dropBP.values]
-        dfSmooth = pd.concat([dfSmooth, df], sort=True, ignore_index=True)
-
-    # to avoid return SV below
-    SVs = SV
-    dfSVs = df[['BreakPt1','BreakPt2','POS_x', 'POS_y','SIZE','snpCount', \
-                'mafCount', 'hetCount', 'mafMean','mafSTD','meanDiff']]
-
-    return dfSmooth, SVs, dfSVs
-
-def size2cutoff(vafCutoff, dataType, eventSize, mafCount):
-    # small segments are more likely to be merged
-    if dataType == 'WGS':
-        if eventSize > 1e7:     return vafCutoff
-        elif eventSize > 1e6:   return vafCutoff + 0.02
-        elif eventSize > 1e5:   return vafCutoff + 0.03
-        else: return vafCutoff + 0.04
-    else:
-        if mafCount > 400: return vafCutoff
-        if mafCount > 200: return vafCutoff + 0.01
-        elif mafCount > 100: return vafCutoff + 0.02
-        elif mafCount > 50: return vafCutoff + 0.03
-        else: return vafCutoff + 0.04
-
-def smooth_genome(dictSNV, dictMAF, dictSV, gender, dataType, PON, genoInfo, minSize, minHet):
-    print('********* VAF segments smoothing ... *********')
-    dictSmooth, dictSVs, dictDfSVs = {},{},{}
-    for CHR in dictSNV:
-        #print('***** VAF segment smoothing for chr' + CHR + ' *****')       
-        # no need to smooth chrY
-        if CHR == 'Y':
-            dfSmooth, SVs, dfSVs = pd.DataFrame(), [], pd.DataFrame()
-        
-        else: 
-            dfSNV = dictSNV[CHR]
-            dfMAF = dictMAF[CHR]
-            SV = dictSV[CHR]
-            dfSmooth, SVs, dfSVs = segment_smooth(dfSNV, dfMAF, SV, dataType, minSize, minHet)
-
-        dictSmooth[CHR] = dfSmooth
-        dictSVs[CHR] = SVs
-        dictDfSVs[CHR] = dfSVs
-        
-    return dictSmooth, dictSVs, dictDfSVs
-
-################################################################
-# Merge VAF and ROH segments
-################################################################
-def merge_VAF_ROH(dictSNV, dictMAF, dictDfSVs, dictDfSVs_ROH, CHR, minSize, minBins):
-    dfSNV = dictSNV[CHR]
-    dfMAF = dictMAF[CHR]
-    dfSVs = dictDfSVs[CHR]
-    dfSVs_ROH = dictDfSVs_ROH[CHR] # dfLOH
-    
-    if CHR == 'Y':
-        return dfSVs
-    # dfLOH
-    dfROH = dfSVs_ROH[(dfSVs_ROH.mafMean < 0.03) & (dfSVs_ROH.SIZE > np.max([1e6, minSize])) &
-                 ((dfSVs_ROH.hetCount/dfSVs_ROH.snpCount < 0.1) | (dfSVs_ROH.snpCount <= 3))].copy() 
-    
-    # no ROH events
-    if dfROH.empty:
-        return dfSVs
-    else:
-        for i in dfROH.index:
-            # keep the first or last ROH
-            if i != 0 and i != dfROH.index[-1]:
-                dfROH.drop(i, axis=0, inplace=True)
-    # still no ROH events
-    if dfROH.empty:
-        return dfSVs
-    
-    print('Found ROH event(s) on chr' + CHR + '...')
-    
-    BP = list(dfSVs.POS_x.values)+list(dfSVs.POS_y.values) + list(dfLOH.POS_x.values) + list(dfLOH.POS_y.values)
-    for i in dfSVs.index:
-        START1, END1 = dfSVs.loc[i, 'POS_x'], dfSVs.loc[i, 'POS_y']
-        for j in dfLOH.index:
-            START2, END2 = dfLOH.loc[j, 'POS_x'], dfLOH.loc[j, 'POS_y']
-            # With intersection, remove VAF breakpoint(s)
-            if START2 <= START1 <= END2:
-                BP.remove(START1)
-            if START2 <= END1 <= END2:
-                BP.remove(END1)
-    SVs = np.sort(BP)
-    df = pd.DataFrame([SVs[:-1], SVs[1:]], index=['POS_x','POS_y']).T
-    df['SIZE'] = df.POS_y - df.POS_x
-    
-    for i in df.index:
-        POS1, POS2 = df.loc[i, 'POS_x'], df.loc[i, 'POS_y']
-        df.loc[i,'snpCount'] = ((dfSNV.POS >= POS1) & (dfSNV.POS <= POS2)).sum()  
-        df.loc[i,'mafCount'] = ((dfMAF.POS >= POS1) & (dfMAF.POS <= POS2)).sum() 
-        df.loc[i,'mafMean'] = dfMAF[(dfMAF.POS>=POS1)&(dfMAF.POS<=POS2)].MAF.mean()
-        df.loc[i,'mafSTD'] = dfMAF[(dfMAF.POS>=POS1)&(dfMAF.POS<=POS2)].MAF.std()
-    # drop breakpoints and gaps
-    df = df[(df.SIZE > minSize) & (df.snpCount > minBins)]
-    
-    return df
-
-def merge_genome(dictSNV, dictMAF, dictDfSVs, dictDfSVs_ROH, minSize, minBins):
-    print('********* Merging VAF and ROH segments ... *********')
-    dictDfSVs_Merged = {}
-    for CHR in dictDfSVs:
-        #print('Working on chr' + CHR + ' ...')
-        dictDfSVs_Merged[CHR] = merge_VAF_ROH(dictSNV, dictMAF, dictDfSVs, dictDfSVs_ROH, CHR, minSize, minBins)
-    return dictDfSVs_Merged
-
-################################################################
-# SubChrom algorithm
-################################################################
-
-# model for one normal distribution
-def OneNorm(x,mean,sd):
-    w = sts.norm.cdf(x,mean,sd)
-    return w
-
-# model for two normal distributions
-# 'mean' is the mean value of the distribution
-# 'frac' is the fraction of 1 distribution, as the two separate distributions are not necessarty the same
-# 'vafMean' is the mean value of all vaf data
-def TwoNorm(x,mean,sd,frac,vafMean):
-    w = frac*sts.norm.cdf(x,mean,sd) + (1-frac)*sts.norm.cdf(x,vafMean*2-mean,sd)
-    return w
-
-# fit data into two models
-def fitModel(dfSNV, START, END, mafMean, mafSTD, vafMeanGenome):
-    # vafCount, vafMean, oneMean, oneSTD, oneProb, twoMeanUp, twoMeanDown, twoSTD, twoProb, vafEvent
-    df = dfSNV[(dfSNV.POS>=START) & (dfSNV.POS<=END)].copy()
-    snpCount = len(df)
-    df = df[(df.VAF > 0) & (df.VAF < 1)] # remove homozygotes
-    vafCount = len(df)
-    vafMean = df.VAF.mean()
-    
-    # too few heterozygotes
-    if vafCount <= snpCount/10:
-        return [vafCount, 0.5, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, 'ROH']
-    
-    # clearly TwoNorm, fit into OneNorm model, which returns accurate vafMean
-    if mafMean < 0.2:
-        if (df.VAF > 0.5).sum() >= (df.VAF < 0.5).sum():
-            df = df[df.VAF > 0.5]
-        else:
-            df = df[df.VAF < 0.5]
-        try:    
-            popt1, pcov1 = opt.curve_fit(OneNorm,np.sort(df.VAF.values),
-                               np.linspace(0,1,len(df)),p0=[0.9, 0.1])
-            twoMean = round(popt1[0],6)
-            twoMeanUp = np.max([twoMean, 1-twoMean])
-            twoMeanDown = np.min([twoMean, 1-twoMean])
-            twoSTD = round(popt1[1],6)
-            return [vafCount, vafMean, np.nan, np.nan, 0, \
-                    twoMeanUp, twoMeanDown, twoSTD, 1, 'TwoNorm']
-        except:
-            return [vafCount, 0.5, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, 'ROH']
-    
-    # detecting subclonal events. NOT working well for cfDNA WGS, because VAF is dispearsed
-    #if mafMean > 0.43:
-        # remove lowMAF SNV to improve model fitting
-    #    df = df[(df.VAF >= 0.2) & (df.VAF <= 0.8)]
-
-    # OneNorm
-    try:
-        popt1, pcov1 = opt.curve_fit(OneNorm, np.sort(df.VAF.values), 
-                                     np.linspace(0,1,len(df)),p0=[0.5, 0.1])
-        oneMean = round(popt1[0],6)
-        oneSTD = round(popt1[1],6)
-        oneProb = sts.kstest(df.VAF.values, OneNorm, args=popt1)[1]
-    except:
-        oneMean,oneSTD,oneProb = vafMeanGenome, np.nan, -1
-    
-    # unbalanced VAF distribution, oneMean can't be > 0.5
-    if oneMean > 0.5 or oneMean < vafMeanGenome/1.1:
-        print('Unbalanced VAF distribution with oneMean:', oneMean, "vafMeanGenome:", vafMeanGenome)
-        try:
-            popt1, pcov1 = opt.curve_fit(lambda x, sd: OneNorm(x, vafMeanGenome, sd), np.sort(df.VAF.values), 
-                                             np.linspace(0,1,len(df)),p0=[0.1])
-            oneMean = vafMeanGenome
-            oneSTD = round(popt1[0],6)
-            oneProb = sts.kstest(df.VAF.values, OneNorm, args=[vafMeanGenome, popt1])[1]
-        except:
-            oneMean,oneSTD,oneProb = vafMeanGenome, np.nan, -1
-    
-    # TwoNorm
-    try:
-        popt2, pcov2 = opt.curve_fit(lambda x,mean,sd,frac: TwoNorm(x,mean,sd,frac,oneMean),
-                                    np.sort(df.VAF.values),np.linspace(0,1,len(df)),p0=[0.3,0.1,0.5])
-        twoMean = round(popt2[0],6)
-        if twoMean > oneMean:
-            twoMeanUp = twoMean
-            twoMeanDown = oneMean * 2 - twoMeanUp
-        else:
-            twoMeanDown = twoMean
-            twoMeanUp = oneMean * 2 - twoMeanDown
-        twoSTD = round(popt2[1],6)
-        twoProb = sts.kstest(df.VAF.values, TwoNorm, args=np.append(popt2, oneMean))[1]
-    except:
-        # small failed events: very likely not normal distribution at all, and thus poor regions
-        # large failed events: very likely fit into one normal distribution only
-        return [vafCount, vafMean, oneMean, oneSTD, oneProb, \
-                np.nan, np.nan, np.nan, -1, 'OneNorm']
-  
-    # compare two models
-    # TwoNorm fits better, adding some noise
-    if oneProb <= twoProb/1.05 and oneSTD > twoSTD:
-        vafEvent = 'TwoNorm'
-    # TwoNorm fits better & TwoNorm STD is smaller
-    elif oneProb <= twoProb and oneSTD/1.1 > twoSTD:
-        vafEvent = 'TwoNorm'
-
-    else:
-        vafEvent = 'OneNorm'
-    return [vafCount, vafMean, oneMean, oneSTD, oneProb, twoMeanUp, twoMeanDown, twoSTD, twoProb, vafEvent]  
-    
-def subchrom_chr(dictSNV, dictCOV, dfCOV, dictDfSVs, CHR, vafMeanGenome, dataType):
-    # working dataframe of chr
-    CHR = str(CHR)
-    dfCHR = dictSNV[CHR]
-    dfSVs = dictDfSVs[CHR]
-    dfCOVCHR = dictCOV[CHR]
-    dfCOVbin = dfCOV[dfCOV.CHR == CHR]
-    EVENTS = []
-    for i in dfSVs.index:
-        START, END = dfSVs.loc[i, 'POS_x'], dfSVs.loc[i, 'POS_y']
-        mafMean, mafSTD = dfSVs.loc[i, 'mafMean'], dfSVs.loc[i, 'mafSTD']
-        # compute coverage
-        snpCount, covMean, covSEM = computeCOV(dfCHR, START, END, dataType)
-        # to avoid local sequencing, such as chr14q
-        if END-START > 2e7:
-            covCountCOV1, covMean1, covSEM1 = computeCOV(dfCOVbin, START, END, dataType)
-            covCountCOV2, covMean2, covSEM2 = computeCOV(dfCOVCHR, START, END, dataType)
-            if covSEM1 > covSEM2:
-                covCountCOV, covMean, covSEM = covCountCOV2, covMean2, covSEM2
-            else:
-                covCountCOV, covMean, covSEM = covCountCOV1, covMean1, covSEM1
-        else: 
-            covCountCOV, covMean, covSEM = computeCOV(dfCOVCHR, START, END, dataType)
-        # compute vaf
-        if CHR != 'Y':
-            vafEvent = fitModel(dfCHR, START, END, mafMean, mafSTD, vafMeanGenome)
-        else:
-            vafEvent = [np.nan, 0.5, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, 'Y']
-        EVENTS.append([CHR, START, END, END-START, snpCount, covMean, covSEM, mafMean, mafSTD] + vafEvent) 
-    df = pd.DataFrame(EVENTS, 
-            columns=['CHR', 'START', 'END', 'SIZE', 'snpCount', 'covMean', 'covSEM',
-                     'mafMean', 'mafSTD',
-                     'vafCount', 'vafMean', 'oneMean', 'oneSTD', 'oneProb', 
-                     'twoMeanUp', 'twoMeanDown', 'twoSTD', 'twoProb', 'vafEvent'])
-    return df
-
-def subchrom_genome(dictSNV, dictCOV, dfCOV, dictDfSVs, genoInfo, chrY_status, dataType):
-    print('********** Model fitting for VAF segments **********')
-    final = pd.DataFrame()
-    for CHR in dictSNV:
-        #print('***** fitModel for chr' + CHR + ' *****')
-        # no need to fit chrY
-        if CHR=='Y' and chrY_status in ['no_Y', 'Y_loss']:
-            continue
-        vafMeanGenome = genoInfo.vafMeanCHR.median()
-        df = subchrom_chr(dictSNV, dictCOV, dfCOV, dictDfSVs, CHR, vafMeanGenome, dataType)
-        final = final.append(df)
-    final.reset_index(inplace=True)
-    final.drop('index',axis=1,inplace=True)
-    return final
-
-################################################################
-# Diploid depth
-################################################################
-def depth(dictSNV, dataType, depthMode):
-    if depthMode == 'auto': # consider all autosomes
-        meanCovChr = []
-        for CHR in range(1,23):
-            dfSNV = dictSNV[str(CHR)]
-            covCount, covMean, covSEM = computeCOV(dfSNV, 1, dfSNV.POS.max(), dataType)
-            meanCovChr.append(covMean)
-        return np.median(meanCovChr)
-    else:
-        CHR = str(depthMode) # consider a specific chromosome, such as 7
-        dfSNV = dictSNV[str(CHR)]
-        covCount, covMean, covSEM = computeCOV(dfSNV, 1, dfSNV.POS.max(), dataType)
-        return covMean
-    
-def diploidDepth(dictCOV, vafSeg, dataType, dipDep):
-    print("********** Optimizing diploid depth ... **********")
-    print("Input diploid mode:", dipDep)
-    
-    # handle both str and int
-    try:
-        return int(dipDep)  # Try to convert to int
-    except ValueError:
-        if dipDep in ["chr1","chr2","chr3","chr4","chr5","chr6","chr7","chr8","chr9","chr10",\
-                      "chr11","chr12","chr13","chr14","chr15","chr16","chr17","chr18","chr19","chr20",
-                      "chr21","chr22","chrX"]:
-            dipDep = dipDep[3:]
-        elif 'chr' in str(dipDep):
-            print('Not supported chromosome:', dipDep)
-            dipDep = 'auto'
-        elif dipDep == 'auto':
-            dipDep = 'auto'
-        else:
-            print('Not supported chromosome:', dipDep)
-            dipDep = 'auto'
-
-        if dipDep == 'auto':
-            OneNormSeg = vafSeg[vafSeg.vafEvent == 'OneNorm']
-            if len(OneNormSeg) >= 3:
-                seqDepth = OneNormSeg.covMean.median()
-            else:
-                seqDepth = depth(dictCOV, dataType, 'auto')
-        else:
-            seqDepth = depth(dictCOV, dataType, dipDep)
-        print('Final diploid mode:', dipDep)
-        print('SeqDepth:', seqDepth)
-        return seqDepth
-
-################################################################
-# Post process VAF events
-################################################################
-def coverageEvent(seqDepth, coverage, gender='F', CHR='1', minTF=0.05):
-    if gender == 'M' and CHR in ['X', 'Y']:
-        covFrac = round((coverage - 0.5 * seqDepth) / (0.5 * seqDepth),5)
-        log2ratio = round(np.log2(coverage / (0.5 * seqDepth)), 5)
-    else:
-        covFrac = round((coverage - seqDepth) / (0.5 * seqDepth),5)
-        log2ratio = round(np.log2(coverage / seqDepth), 5)
-        
-    if coverage == 0: # uncovered regions
-        covEvent = 'NoCoverage'
-        covFrac = 0
-    elif covFrac <= -minTF:
-        covEvent = 'Loss'
-    elif covFrac >=  minTF:
-        covEvent = 'Gain'
-    else:
-        covEvent = 'Diploid'        
-    return covEvent, covFrac, log2ratio
-
-# VAF to cell fraction conversion function        
-def VAFtoFrac(vafMean, mode='Diploid'):
-    lowerMean = np.min([vafMean, 1-vafMean])
-    if mode=='Diploid':
-        return 1 - lowerMean*2
-    elif mode == 'Loss':
-        return (lowerMean - 0.5) / (0.5*lowerMean - 0.5) # OneLoss
-    elif mode == 'Gain':
-        return 1/lowerMean -2 # OneGain
-
-def VAFtoAB(seqDepth, covMean, vafMean):
-    # x gain of chrA , y gain of chrB
-    # seqDepth * 'x' + seqDepth * 'y' = 2*(covMean-seqDepth)
-    # (1-vafMean) * 'x' - vafMean * 'y' = 2*vafMean - 1
-    left  = [[seqDepth, seqDepth],[1-vafMean, -vafMean]]
-    right = [2*(covMean-seqDepth), 2*vafMean-1]
-    results = np.linalg.solve(left, right)
-    chrA_freq = round(results[0], 3)
-    chrB_freq = round(results[1], 3)
-    return (chrA_freq, chrB_freq) if chrA_freq<chrB_freq else (chrB_freq, chrA_freq)
-
-def vafEVENTS(vafSeg, dictSNV, genoInfo, seqDepth, gender, dataType, minTF):
-    print('********** Post processing VAF events ... **********')
-    # exclude no coverage regions, probably due to off-target SNPs 
-    df = vafSeg[((vafSeg.vafEvent == 'TwoNorm') | (vafSeg.vafEvent == 'ROH')) & (vafSeg.covMean != 0)].copy()
-    
-    if len(df) == 0:
-        return pd.DataFrame([], columns=['CHR', 'START', 'END', 'SIZE', 'covMean',
-       'covEvent', 'log2ratio', 'cnvEvent', 'vafEvent', 'vafFrac',
-       'vaf_cov_Ratio', 'chrA_num', 'chrA_freq', 'chrB_num', 'chrB_freq'])
-    
-    for i in df.index:
-        CHR = df.loc[i,'CHR']
-        # cov events, all vaf segments are autosomes
-        covEvent, covFrac, log2ratio = coverageEvent(seqDepth, df.loc[i,'covMean'], gender, 'auto', minTF)
-        df.loc[i,'covEvent'], df.loc[i,'covFrac'], df.loc[i,'log2ratio'] = covEvent, covFrac, log2ratio
-        
-        # vaf evetns
-        vafShift = 0.5 - (df.loc[i,'twoMeanUp'] + df.loc[i,'twoMeanDown'])/2
-        vafMeanNEW = df.loc[i,'twoMeanDown'] + vafShift
-        vafFrac = VAFtoFrac(vafMeanNEW, covEvent)
-        df.loc[i,'cnvEvent'] = df.loc[i,'covEvent']
-        df.loc[i,'vafFrac'] = vafFrac
-        if covFrac != covFrac or covFrac == 0 or vafFrac != vafFrac: # not covered
-            vaf_cov_Ratio = 1
-        else:
-            vaf_cov_Ratio = abs(vafFrac/covFrac)
-        df.loc[i,'vaf_cov_Ratio'] = vaf_cov_Ratio
-        
-        # chrA, chrB, cnvEvent
-        if df.loc[i, 'vafEvent'] == 'ROH':
-            if gender == 'M' and df.loc[i,'CHR'] in ['X','Y']:
-                if covEvent == 'Diploid':
-                    df.loc[i,'cnvEvent'] = 'N/A'
-                    df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 0, np.nan
-                    df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1, np.nan
-                else:
-                    df.loc[i,'cnvEvent'] = covEvent
-                    df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 0, np.nan
-                    df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1+covFrac, abs(covFrac)
-            elif df.loc[i, 'covMean'] < seqDepth*0.7:
-                df.loc[i,'cnvEvent'] = 'Loss'
-                df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 0, np.nan
-                df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1, 1
-            else:
-                df.loc[i,'cnvEvent'] = 'cnLOH'
-                df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 0, np.nan
-                df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 2, 1
-                
-        else: # TwoNorm
-            if covEvent == 'Diploid': # cn_LOH
-                df.loc[i,'cnvEvent'] = 'cnLOH'
-                df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 1-vafFrac, -vafFrac
-                df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1+vafFrac, vafFrac
-            elif covEvent == 'Gain':
-                if vaf_cov_Ratio < 0.5 or vaf_cov_Ratio > 2:
-                    chrA_gain, chrB_gain = VAFtoAB(seqDepth, df.loc[i,'covMean'], vafMeanNEW)
-                    df.loc[i,'cnvEvent'] = 'complexGain'
-                    df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 1+chrA_gain, chrA_gain
-                    df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1+chrB_gain, chrB_gain
-                else:
-                    df.loc[i,'cnvEvent'] = covEvent
-                    df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 1, np.nan
-                    df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1 + vafFrac, vafFrac
-            else: # Loss
-                if vaf_cov_Ratio < 0.5 or vaf_cov_Ratio > 2:
-                    chrA_gain, chrB_gain = VAFtoAB(seqDepth, df.loc[i,'covMean'], vafMeanNEW)
-                    df.loc[i,'cnvEvent'] = 'complexLoss'
-                    df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 1+chrA_gain, chrA_gain
-                    df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1+chrB_gain, chrB_gain
-                else:
-                    df.loc[i,'cnvEvent'] = covEvent
-                    df.loc[i,'chrA_num'], df.loc[i,'chrA_freq'] = 1, np.nan 
-                    df.loc[i,'chrB_num'], df.loc[i,'chrB_freq'] = 1 - vafFrac, -vafFrac
-    
-    return df[['CHR', 'START', 'END', 'SIZE', 'covMean',
-       'covEvent', 'log2ratio', 'cnvEvent', 'vafEvent', 'vafFrac',
-       'vaf_cov_Ratio', 'chrA_num', 'chrA_freq', 'chrB_num', 'chrB_freq']]
 
 ################################################################
 # Compute coverage events using seqDepth
@@ -1331,12 +1420,20 @@ def covEVENTS(dictDfSVs_COV, seqDepth, gender, minBins, cutoff):
 ################################################################
 # cov segments - vaf segments
 ################################################################
-def COVminusVAF(covSeg, vafSeg, dictCOV, minSize, minBins, seqDepth, gender, minTF, dataType):
+def COVminusVAF(covSeg, vafSeg, dictCOV, minSize, minBins, seqDepth, gender, minTF, dataType, build):
     print('********** Merging coverage and VAF segments ... **********')
     if len(covSeg) == 0:
         print('No coverage segments ...')
         return pd.DataFrame()
+    
+    # remove nonPARX segment from vafSeg
+    [PAR1_S,PAR1_E], [PAR2_S,PAR2_E] = PAR_Xpos(build)
+    nonPARX = ((vafSeg.CHR == 'X') & (vafSeg.START == PAR1_E) & (vafSeg.END == PAR2_S))
+    if nonPARX.sum() == 1:
+        vafSeg = vafSeg[~nonPARX].copy()
+
     covSegBed = pybedtools.BedTool.from_dataframe(covSeg)
+    vafSeg.END = vafSeg.END.astype(int)
     vafSegBed = pybedtools.BedTool.from_dataframe(vafSeg)
     # https://bedtools.readthedocs.io/en/latest/content/tools/subtract.html
     # cov unique events, no overlaps at all
@@ -1347,8 +1444,12 @@ def COVminusVAF(covSeg, vafSeg, dictCOV, minSize, minBins, seqDepth, gender, min
     df = df2.subtract(df1, A=True)
     
     df1 = df1.to_dataframe()
-    df1.columns = ['CHR', 'START', 'END', 'SIZE', 'COV', 'covEvent', 'covFrac', 'log2ratio']
-    df1.CHR = df1.CHR.astype(str)
+    if len(df1) == 0:
+        df1 = pd.DataFrame([],
+               columns=['CHR', 'START', 'END', 'SIZE', 'COV', 'covEvent', 'covFrac', 'log2ratio'])
+    else:
+        df1.columns = ['CHR', 'START', 'END', 'SIZE', 'COV', 'covEvent', 'covFrac', 'log2ratio']
+        df1.CHR = df1.CHR.astype(str)
     
     # filter small events
     df = df.to_dataframe()
@@ -1395,25 +1496,33 @@ def COVminusVAF(covSeg, vafSeg, dictCOV, minSize, minBins, seqDepth, gender, min
 ################################################################
 # Estimates of tumor fraction *** May need revision
 ################################################################
-def tumorFrac(vafSeg, covSeg, seqDepth):
+def tumorFrac(vafSeg, covSeg, seqDepth, minTF=0.1):
     print('********** Estimating tumor fraction ... **********')
     df = vafSeg.copy()
     # exclude amplification and samll events
-    if ((df.vafFrac < 1) & (df.SIZE > 3e7)).sum()  > 0:
-        TF = df[(df.vafFrac < 1) & (df.SIZE > 2e7)].vafFrac.median()
+    if ((df.vafFrac < 1.05) & (df.SIZE > 3e7)).sum() > 3:
+        TF = df[(df.vafFrac < 1.05) & (df.SIZE > 2e7)].vafFrac.median()
+        print('TF estimation senario 1: >3 TwoNorm')
+    elif 0 < ((df.vafFrac < 1.05) & (df.SIZE > 3e7)).sum() <= 3:
+        TF = df[(df.vafFrac < 1.05) & (df.SIZE > 2e7)].vafFrac.max()
+        print('TF estimation senario 2: <=3 TwoNorm')
     # exclude amplification
-    elif (df.vafFrac < 1).sum()  > 0:
+    elif (df.vafFrac <= 1).sum()  > 0:
         TF = df[df.vafFrac < 1].vafFrac.max()
-    elif len(df) > 0:
-        TF = df.vafFrac.max()/2
+        print('TF estimation senario 3: small TwoNorm')
+    elif ((df.CHR!= 'X') & (df.vafEvent != 'ROH')).sum() > 0: # exclude male chrX
+        TF = df[(df.CHR!= 'X') & (df.vafEvent != 'ROH')].vafFrac.max()/2
+        print('TF estimation senario 4: vafFrac > 1')
     elif len(covSeg) > 0:
-        TF = covSeg.covFrac.median()
+        TF = np.abs(covSeg.covFrac).median()
+        print('TF estimation senario 5: covEvents only')
     else:
         TF = 'Unknown'
         final = pd.DataFrame([],
                columns=['CHR', 'START', 'END', 'SIZE', 'covMean','covLog2Ratio', 'EVENT', 'Allelic_Imbalance', 
                         'chrA_freq', 'chrB_freq', 'chrA_CNV', 'chrB_CNV', 'chrA_TF', 'chrB_TF'])
         return 0, final
+    print('TF estimation:', round(TF, 3))
     
     #print('Working on VAF segments ...')
     if len(df) == 0:
@@ -1421,11 +1530,10 @@ def tumorFrac(vafSeg, covSeg, seqDepth):
                columns=['CHR', 'START', 'END', 'SIZE', 'covMean','covLog2Ratio', 'EVENT', 'Allelic_Imbalance', 
                         'chrA_freq', 'chrB_freq', 'chrA_CNV', 'chrB_CNV', 'chrA_TF', 'chrB_TF'])
     else:
-        df['covLog2Ratio'] = np.nan
         df['chrA_CNVraw'] = df.chrA_freq/TF
         df['chrB_CNVraw'] = df.chrB_freq/TF
         df['chrA_CNV'],  df['chrB_CNV'] = np.nan, np.nan
-        df['chrA_TF'],   df['chrB_TF'] = 0, 0
+        df['chrA_TF'],   df['chrB_TF'] = np.nan, np.nan
         df['Allelic_Imbalance'] = 'yes'
         for i in df.index:
             # Tumor fraction and CNV
@@ -1470,23 +1578,26 @@ def tumorFrac(vafSeg, covSeg, seqDepth):
                 df.loc[i, 'chrA_TF'] = df.loc[i, 'chrA_freq']/df.loc[i, 'chrA_CNV']
                 df.loc[i, 'chrB_TF'] = df.loc[i, 'chrB_freq']/df.loc[i, 'chrB_CNV']
 
-            # log2ratio
-            if df.loc[i, 'cnvEvent'] in ['Gain', 'Loss']:
-                chrB_COV = seqDepth * (1 + df.loc[i,'chrB_freq']/2)
-                df.loc[i,'covLog2Ratio'] = np.log2(chrB_COV/seqDepth)
-            elif df.loc[i, 'cnvEvent'] in ['cnLOH']:
-                df.loc[i,'covLog2Ratio'] = 0
-            elif df.loc[i, 'cnvEvent'] in ['complexGain', 'complexLoss']:
-                df.loc[i,'covLog2Ratio'] = df.loc[i,'log2ratio']
         #print(df.columns)
-        df = df[['CHR', 'START', 'END', 'SIZE', 'covMean', 'covLog2Ratio', 'cnvEvent', 'Allelic_Imbalance', 
+        df = df[['CHR', 'START', 'END', 'SIZE', 'covMean', 'log2ratio', 'cnvEvent', 'Allelic_Imbalance', 
                  'chrA_freq', 'chrB_freq', 'chrA_CNV', 'chrB_CNV', 'chrA_TF', 'chrB_TF']]
         df.columns = ['CHR', 'START', 'END', 'SIZE', 'covMean','covLog2Ratio', 'EVENT', 'Allelic_Imbalance', 
                  'chrA_freq', 'chrB_freq', 'chrA_CNV', 'chrB_CNV', 'chrA_TF', 'chrB_TF']
     
     # coverage
     #print('Working on coverage segments ...')
-    df1 = covSeg.copy()
+    if len(covSeg) == 0:
+        return round(TF, 3), df
+    
+    # filter OneNorm loss if less than 0.4
+    if minTF >= 0.1:
+        lowLoss = ((covSeg.covFrac > -0.4) & (covSeg.covEvent == 'Loss'))
+        lowGain = ((covSeg.covFrac < 0.2) & (covSeg.covEvent == 'Gain'))
+        df1 = covSeg[(~lowLoss) & (~lowGain)].copy()
+    else:
+        lowLoss = ((covSeg.covFrac > -0.4) & (covSeg.covEvent == 'Loss'))
+        df1 = covSeg[~lowLoss].copy()
+        
     if len(df1) == 0:
         return round(TF, 3), df
     df1['CNVraw'] = abs(df1.covFrac/TF)
@@ -1501,7 +1612,11 @@ def tumorFrac(vafSeg, covSeg, seqDepth):
             df1.loc[i, 'CNV'] = round(df1.loc[i, 'CNVraw'])
         df1.loc[i, 'Tumor_Fraction'] = abs(df1.loc[i, 'covFrac']/df1.loc[i, 'CNV'])
     #print(df1.columns)
-    df1 = df1[['CHR', 'START', 'END', 'SIZE', 'COV', 'log2ratio', 'covEvent', 'Allelic_Imbalance', 
+    if 'COV' in df1.columns:
+        df1 = df1[['CHR', 'START', 'END', 'SIZE', 'COV', 'log2ratio', 'covEvent', 'Allelic_Imbalance', 
+               'covFrac', 'CNV', 'Tumor_Fraction']]
+    else:
+        df1 = df1[['CHR', 'START', 'END', 'SIZE', 'covMean', 'log2ratio', 'covEvent', 'Allelic_Imbalance', 
                'covFrac', 'CNV', 'Tumor_Fraction']]
     df1.columns = ['CHR', 'START', 'END', 'SIZE', 'covMean', 'covLog2Ratio', 'EVENT', 'Allelic_Imbalance',
                 'chrB_freq', 'chrB_CNV', 'chrB_TF']
@@ -1542,6 +1657,7 @@ def tumorFrac(vafSeg, covSeg, seqDepth):
             final.loc[i, 'chrB_CNV'] = '+' + str(int(final.loc[i, 'chrB_CNV']))
         elif final.loc[i, 'chrB_CNV'] < 0:
             final.loc[i, 'chrB_CNV'] = str(int(final.loc[i, 'chrB_CNV']))
+
     return round(TF, 3), final
 
 def ROUND(value, decimal=3):
@@ -1597,6 +1713,7 @@ def plotSegments(dictSNV, dictDfSV, dictDfSVs, dictCOV, dictDfSV_COV, dictDfSVs_
             ax2.axvline(x=dataSVs.loc[i,'POS_x'], color='red', alpha=1)
             ax2.axvline(x=dataSVs.loc[i,'POS_y'], color='red', alpha=1)
 
+
 ################################################################
 # SubChrom visualization
 ################################################################
@@ -1626,7 +1743,7 @@ def plotCoverage(ax, df, genoInfo, seqDepth, smooth=True, xTickLabel=False):
     
     # x-axis limit, ticks, labels
     plotGenemoeSize = genoInfo.loc['Y', 'prevLen'] + genoInfo.loc['Y', 'chrSize']
-    ax.set(xlim=(-3e6, plotGenemoeSize + 6e6))
+    ax.set(xlim=(-3e6, plotGenemoeSize + 3e6))
     
     labels = genoInfo.index
     values = genoInfo.loc[labels].plotPos.values
@@ -1656,8 +1773,8 @@ def plotVAF(ax, dictSNV, genoInfo, gender, seqDepth, minCOV=-1, xTickLabel=False
     print('minCOV for plotting VAF:', minCOV)
     
     # number of het
-    hetCount = genoInfo.hetCount_1Mb.median()
-    if hetCount <= 12: # cfDNA 2-10
+    hetCount = genoInfo.hetCount_1Mb.max()
+    if hetCount <= 10: # cfDNA 2-10
         markerSize=1.5
         plotAlpha=1
     elif hetCount <= 30: # WES 14
@@ -1710,7 +1827,7 @@ def plotVAF(ax, dictSNV, genoInfo, gender, seqDepth, minCOV=-1, xTickLabel=False
     
     # x-axis limit, ticks, labels
     plotGenemoeSize = genoInfo.loc['Y', 'prevLen'] + genoInfo.loc['Y', 'chrSize']
-    ax.set(xlim=(-3e6, plotGenemoeSize + 6e6))
+    ax.set(xlim=(-3e6, plotGenemoeSize + 3e6))
     
     labels = genoInfo.index
     values = genoInfo.loc[labels].plotPos.values
@@ -1729,8 +1846,8 @@ def plotLog2Ratio(ax, dictCOV1, df, genoInfo, gender, seqDepth, xTickLabel=False
         build = 'hg38'
         
     # number of het
-    hetCount = genoInfo.hetCount_1Mb.median()
-    if hetCount <= 12: # cfDNA 2-10
+    hetCount = genoInfo.hetCount_1Mb.max()
+    if hetCount <= 10: # cfDNA 2-10
         markerSize=2
         plotAlpha=0.5
     elif hetCount <= 30: # WES 14
@@ -1767,6 +1884,8 @@ def plotLog2Ratio(ax, dictCOV1, df, genoInfo, gender, seqDepth, xTickLabel=False
             dfCOV.loc[nonPAR, 'log2COV'] =  np.log2(2 * dfCOV.loc[nonPAR, 'COV']/seqDepth)
         elif gender == 'M' and CHR == 'Y':
             dfCOV['log2COV'] = np.log2(2 * dfCOV.COV/seqDepth)
+            markerSize=1
+            plotAlpha=1
         elif gender == 'F' and CHR == 'Y':
             continue
         else:
@@ -1800,10 +1919,13 @@ def plotLog2Ratio(ax, dictCOV1, df, genoInfo, gender, seqDepth, xTickLabel=False
         y  = df.loc[i,'covLog2Ratio']
        
         # lines
-        if x2 - x1 < 2e6:
+        plotGap = 3e6
+        if x2 - x1 < plotGap:
             ax.plot(x1+(x2-x1)/2, y, 'o', ms=2.5, color=COLOR)
+        elif x2 - x1 < 2*plotGap:
+            ax.plot([x1+plotGap/2,x2-plotGap/2], [y,y], c=COLOR, linewidth=2.5)
         else:
-            ax.plot([x1,x2], [y,y], c=COLOR, linewidth=2.5)
+            ax.plot([x1+plotGap,x2-plotGap], [y,y], c=COLOR, linewidth=2.5)
     
     # y-axis limit, ticks, labels
     if len(df) == 0:
@@ -1822,7 +1944,7 @@ def plotLog2Ratio(ax, dictCOV1, df, genoInfo, gender, seqDepth, xTickLabel=False
         
     # x-axis limit, ticks, labels
     plotGenemoeSize = genoInfo.loc['Y', 'prevLen'] + genoInfo.loc['Y', 'chrSize']
-    ax.set(xlim=(-3e6, plotGenemoeSize + 6e6))
+    ax.set(xlim=(-3e6, plotGenemoeSize + 3e6))
     
     labels = genoInfo.index
     values = genoInfo.loc[labels].plotPos.values
@@ -1858,11 +1980,11 @@ def plotFreq(ax, df, genoInfo, xTickLabel=False):
             elif df.loc[i,'EVENT'] == 'cnLOH':
                 chrB_COLOR = 'blue'
             elif df.loc[i,'EVENT'] in ['complexLoss', 'complexGain']:
-                if df.loc[i,'chrA_TF'] > 0:
+                if df.loc[i,'chrA_freq'] > 0:
                     chrA_COLOR = 'red'
                 else:
                     chrA_COLOR = 'limegreen'
-                if df.loc[i,'chrB_TF'] > 0:
+                if df.loc[i,'chrB_freq'] > 0:
                     chrB_COLOR = 'red'
                 else:
                     chrB_COLOR = 'limegreen'
@@ -1874,12 +1996,16 @@ def plotFreq(ax, df, genoInfo, xTickLabel=False):
         chrB_y = abs(df.loc[i,'chrB_TF'])
        
         # plot lines
-        if x2 - x1 < 2e6:
+        plotGap = 3e6
+        if x2 - x1 < plotGap:
             ax.plot(x1+(x2-x1)/2, chrA_y, 'o', ms=2.5, color=chrA_COLOR)
             ax.plot(x1+(x2-x1)/2, chrB_y, 'o', ms=2.5, color=chrB_COLOR)
+        elif x2 - x1 < 2*plotGap:
+            ax.plot([x1+plotGap/2,x2-plotGap/2], [chrA_y,chrA_y], color=chrA_COLOR, linewidth=2.5)
+            ax.plot([x1+plotGap/2,x2-plotGap/2], [chrB_y,chrB_y], color=chrB_COLOR, linewidth=2.5)
         else:
-            ax.plot([x1,x2], [chrA_y,chrA_y], color=chrA_COLOR, linewidth=2.5)
-            ax.plot([x1,x2], [chrB_y,chrB_y], color=chrB_COLOR, linewidth=2.5)
+            ax.plot([x1+plotGap,x2-plotGap], [chrA_y,chrA_y], color=chrA_COLOR, linewidth=2.5)
+            ax.plot([x1+plotGap,x2-plotGap], [chrB_y,chrB_y], color=chrB_COLOR, linewidth=2.5)
     
     # y-axis limit, ticks, labels
     ax.set(ylim=(0, 1.03), yticks=([0, 0.2, 0.4, 0.6,  0.8, 1]))
@@ -1887,7 +2013,7 @@ def plotFreq(ax, df, genoInfo, xTickLabel=False):
     
     # x-axis limit, ticks, labels
     plotGenemoeSize = genoInfo.loc['Y', 'prevLen'] + genoInfo.loc['Y', 'chrSize']
-    ax.set(xlim=(-3e6, plotGenemoeSize + 6e6))
+    ax.set(xlim=(-3e6, plotGenemoeSize + 3e6))
     
     labels = genoInfo.index
     values = genoInfo.loc[labels].plotPos.values
@@ -1918,8 +2044,11 @@ def plotFinal(dictSNV,dictCOV,dfCOV,df,genoInfo,gender,seqDepth,SAMPLE,dataType,
         plotCoverage(ax[0], dfCOV, genoInfo, seqDepth)
         plotVAF(ax[1], dictSNV, genoInfo, gender, seqDepth, minCOV)
         plotLog2Ratio(ax[2], dictCOV, df, genoInfo, gender, seqDepth, xTickLabel=True)
-        yPos = 0.015
-        start = 0.2
+        #yPos = 0.015
+        #start = 0.2
+        yPos = 0.04
+        start = 0.135
+        fig.add_artist(Text(0.78, yPos, text='Tumor fraction: '+ str(TF), size=11, va='center'))
         
     # legend
     size  = 0.02
@@ -1946,7 +2075,7 @@ def plotFinal(dictSNV,dictCOV,dfCOV,df,genoInfo,gender,seqDepth,SAMPLE,dataType,
             os.mkdir('results')
         plt.subplots_adjust(bottom=0.13, top=0.95, left=0.06, right=0.98)
         plt.savefig('results/' + SAMPLE + '.' + dataType + '.CNV.png', dpi=300)
-        plt.savefig('results/' + SAMPLE + '.' + dataType + '.CNV.pdf', format="pdf", dpi=300)
+        #plt.savefig('results/' + SAMPLE + '.' + dataType + '.CNV.pdf', format="pdf", dpi=300)
         plt.close()
 
 ################################################################
@@ -2109,8 +2238,8 @@ def plot_AI(dictSNV,dictCOV,final,seqDepth,genoInfo,dataType,SAMPLE,geneList,SAV
             os.mkdir('results')
         plt.subplots_adjust(bottom=0.06, top=0.96, left=0.06, right=0.95)
         plt.savefig('results/' + SAMPLE + '.' + dataType + '.focal.png', dpi=300)
-        plt.savefig('results/' + SAMPLE + '.' + dataType + '.focal.pdf', format="pdf", dpi=300)
-        plt.close()
+        #plt.savefig('results/' + SAMPLE + '.' + dataType + '.focal.pdf', format="pdf", dpi=300)
+        
 
 ################################################################
 # argparse
@@ -2137,8 +2266,8 @@ if __name__ == "__main__":
     )
 
     # Define required arguments and options
-    parser.add_argument("-s", "--sample", dest='filename', type=str, required=True)
-    parser.add_argument("-t", "--type",   dest='datatype', type=str, required=True, 
+    parser.add_argument("-s", "--sample", dest='samplename', type=str, required=True)
+    parser.add_argument("-d", "--data",   dest='datatype', type=str, required=True, 
                        help="Sequencing data type. Options: WGS, WES, cfDNA, panel, etc")
     
     # Define optional arguments and options
@@ -2146,15 +2275,17 @@ if __name__ == "__main__":
                        help="Genome build. Options: hg38 (default), hg19")
     parser.add_argument("-n", dest='PON', type=str, default='../data/cfDNA_PoN.txt',
                        help="Normal or panel of normal")
-    parser.add_argument("-cs", dest='doCovSeg', type=str, default='True',
+    parser.add_argument("-cs", dest='doCOVseg', type=str, default='True',
                        help="Perform coverage segmentation")
+    parser.add_argument("-rs", dest='doROHseg', type=str, default='True',
+                       help="Perform ROH segmentation")
     parser.add_argument("-md", dest='marker', type=str, default='/SubChrom/data/SNPmarker',
                        help="/path/to/SNPmarker Default: /SubChrom/data/SNPmarker")
     
     parser.add_argument("-minTF", dest='minTF', type=float, default=0.1,
                        help="Minimal tumor fraction to report a CNV event. Default: 0.1")
     parser.add_argument("-minSize", dest='minSize', type=int, default=1e5,
-                       help="Minimal size to report a CNV event. Default: 10000")
+                       help="Minimal size to report a CNV event. Default: 100000")
     parser.add_argument("-minBins", dest='minBins', type=int, default=30,
                        help="Minimal data bins to report a CNV event. Default: 30")
     parser.add_argument("-gender", dest='gender', type=str, default='atuo',
@@ -2165,7 +2296,7 @@ if __name__ == "__main__":
     Option: chr1...chr22, chrX, a specific value (such as 500). 
     Default: auto (auto optimization)""")
     
-    parser.add_argument("-covWin", dest='covWindow', type=int, default=30,
+    parser.add_argument("-covWin", dest='covWindow', type=int, default=2000000,
                        help="Coverage window size (bp) for visualization. Default: 2000000. Minimum: 500000")  
     parser.add_argument("-plotTF", dest='plotTF', type=str, default=True,
                        help="Plot tumor fraction or not. Default: True")
@@ -2177,12 +2308,13 @@ if __name__ == "__main__":
     
     # Access the value
     workDir = '.'
-    SAMPLE  = args.filename
+    SAMPLE  = args.samplename
     dataType = args.datatype
     
     build = args.genome
     PON = args.PON
-    doCovSeg = args.doCovSeg
+    doCOVseg = args.doCOVseg
+    doROHseg = args.doROHseg
     SNPmarker = args.marker
     
     minTF = args.minTF
@@ -2198,43 +2330,61 @@ if __name__ == "__main__":
     variant_path = workDir + '/' + SAMPLE + '.' + dataType + '.snp.txt'
     bedGraph = workDir + '/' + SAMPLE + '.' + dataType + '.bedGraph'
     
+    # creat folder
+    if os.path.exists('results') == False:
+        os.mkdir('results')
+    else:
+        shutil.rmtree('results')
+        os.mkdir('results')
+    
     # load SNP and coverage raw data
     dictSNVall = SNPmarkers(variant_path, build, workDir, SNPmarker)
     dictSNV, genoInfo, rawDepth = filter_markers(dictSNVall, build, dataType, bedGraph)
     gender, chrY_status = get_gender(GENDER, genoInfo, dataType)
     dictCOV = load_coverage(dictSNV, bedGraph, genoInfo, dataType, PON)
     dfCOV = coverage_genome(dictCOV, dictSNV, genoInfo, gender, dataType, chrY_status, covWindow)
-
-    # coverage segmentation
-    dictMAF_COV, dictSV_COV, dictDfSV_COV = segment_genome_COV(dictCOV, gender, genoInfo, workDir, dataType, PON, doCovSeg)
-    dictSmooth_COV, dictSVs_COV, dictDfSVs_COV = smooth_genome_COV(dictMAF_COV, dictSV_COV, dictDfSV_COV, gender, dataType, minSize, minBins)
-
+    
     # VAF segmentation
-    dictMAF, dictSV, dictDfSV = segment_genome(dictSNV, gender, genoInfo, workDir)
-    dictSmooth, dictSVs, dictDfSVs = smooth_genome(dictSNV, dictMAF, dictSV, gender, dataType, PON, genoInfo, minSize, minBins)
-
-    # ROH segmentation for non WGS data and merge with VAF
-    if dataType != 'WGS':
-        dictMAF_ROH, dictSV_ROH, dictDfSV_ROH = segment_genome(dictSNV, gender, genoInfo, workDir, dataCol='ROH')
-        dictSmooth_ROH, dictSVs_ROH, dictDfSVs_ROH = smooth_genome(dictSNV, dictMAF_ROH, dictSV_ROH, gender, dataType, PON, genoInfo, minSize, minBins)
+    dictMAF, dictSV, dictDfSV = segment_genome(dictSNV, gender, chrY_status, genoInfo, workDir)
+    dictSmooth, dictSVs, dictDfSVs = \
+        smooth_genome(dictSNV, dictMAF, dictSV, gender, dataType, minSize, minBins, build)
+    
+    if str(doROHseg) == 'True':
+        dictMAF_ROH, dictSV_ROH, dictDfSV_ROH = \
+            segment_genome(dictSNV, gender, chrY_status, genoInfo, workDir, dataCol='ROH', dataType=dataType)
+        dictSmooth_ROH, dictSVs_ROH, dictDfSVs_ROH = \
+            smooth_genome(dictSNV, dictMAF_ROH, dictSV_ROH, gender, dataType, 3e6, minBins, build, dataCol='ROH')
         dictDfSVs_Merged = merge_genome(dictSNV, dictMAF, dictDfSVs, dictDfSVs_ROH, minSize, minBins)
     else:
         dictDfSVs_Merged = dictDfSVs
-    
+        
     # VAF events
-    vafSeg = subchrom_genome(dictSNV, dictCOV, dfCOV, dictDfSVs_Merged, genoInfo, chrY_status, dataType)
-    seqDepth = diploidDepth(dictCOV, vafSeg, dataType, dipDep)
-    vafSegFinal = vafEVENTS(vafSeg, dictSNV, genoInfo, seqDepth, gender, dataType, minTF)
-
+    vafSegments = subchrom_genome(dictSNV, dictCOV, dfCOV, dictDfSVs_Merged, genoInfo, chrY_status, dataType)
+    seqDepth = diploidDepth(dictCOV, vafSegments, dataType, dipDep)
+    vafSeg, rawCovSeg = vafEVENTS(vafSegments, dictSNV, genoInfo, seqDepth, gender, dataType, minTF)
+    
     # coverage events and merge with VAF
-    covSegments = covEVENTS(dictDfSVs_COV, seqDepth, gender, minBins, minTF)
-    covSeg = COVminusVAF(covSegments, vafSegFinal, dictCOV, minSize, minBins, seqDepth, gender, minTF, dataType)
-    TF, final = tumorFrac(vafSegFinal, covSeg, seqDepth)
-
+    if str(doCOVseg) == 'True':
+        dictMAF_COV, dictSV_COV, dictDfSV_COV = segment_genome_COV(dictCOV, gender, genoInfo, workDir, dataType, PON, doCOVseg)
+        dictSmooth_COV, dictSVs_COV, dictDfSVs_COV = smooth_genome_COV(dfCOV, dictMAF_COV, dictSV_COV, dictDfSV_COV, gender, dataType, minSize, minBins)
+        covSegments = covEVENTS(dictDfSVs_COV, seqDepth, gender, minBins, minTF)
+        covSeg = COVminusVAF(covSegments, vafSeg, dictCOV, minSize, minBins, seqDepth, gender, minTF, dataType, build)
+    else:
+        covSeg = rawCovSeg
+    TF, final = tumorFrac(vafSeg, covSeg, seqDepth, minTF)
+    
     # plot and save
     plotFinal(dictSNV,dictCOV, dfCOV,final,genoInfo,gender,seqDepth,SAMPLE,dataType,TF,plotTF=plotTF, SAVE=True)
     plot_AI(dictSNV, dictCOV, final, seqDepth, genoInfo, dataType, SAMPLE, geneList, SAVE=True)
-    if os.path.exists('results') == False:
-        os.mkdir('results')
-    final.to_csv('results/' + SAMPLE + '.' + dataType + '.SubChrom.txt', sep='\t', index=False)
     
+    vafSegments.to_csv('results/' + SAMPLE + '.' + dataType + '.vafSegments.txt', sep='\t', index=False)
+    vafSeg.to_csv('results/' + SAMPLE + '.' + dataType + '.vafEvents.txt', sep='\t', index=False)
+    final.to_csv('results/' + SAMPLE + '.' + dataType + '.SubChrom.txt', sep='\t', index=False)
+    covSeg.to_csv('results/' + SAMPLE + '.' + dataType + '.covSegments.txt', sep='\t', index=False)
+    
+    # output sample info
+    with open('results/' + SAMPLE + '.' + dataType + '.info.txt', 'w') as info:
+        info.write("seqDepth:\t" + str(seqDepth) + "\n")
+        info.write("gender:\t" + gender + "\n")
+        info.write("chrY_status:\t" + chrY_status + "\n")
+        info.write("TumorFrac:\t" + str(TF) + "\n")

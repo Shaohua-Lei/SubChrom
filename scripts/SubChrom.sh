@@ -13,19 +13,20 @@ SNPmarker='NA'
 
 OUTPUT=$(pwd)
 GBUILD='hg38'
-PON='N'
-covSeg='False'
+PON='none'
+COVseg='False'
+ROHseg='False'
 minTF=0.1
 minSize=1000000
 minBins=100
 GENDER='auto'
 dipDep='auto'
-covWindow=2000000
+covWindow='auto'
 plotTF='True'
 preFile='True'
 GENES='cfDNA'
 
-VERSION='0.1.0 (November 18, 2023)'
+VERSION='0.1.0 (October 17, 2024)'
 
 #################################################################################
 # Display usage
@@ -35,19 +36,19 @@ usage()
 {
     echo ""
     echo "****************************************************************************************************"
-    echo "Program: SubChrom CNV calling"
+    echo "Program: SubChrom CNV/cnLOH calling"
     echo -e "Version: $VERSION"
     echo "****************************************************************************************************"
     echo ""
-    echo "Usage: $0 -s filename -i sample.bam -d cfDNA -r hg38.fa -p panel_bin.bed -md hg38"
+    echo "Usage: $0 -s filename -i input.data -d cfDNA -r reference.fa -p panel_bin.bed -md hg38"
     echo ""
     echo -e "   -h  --help                Show this help message and exit"
     echo ""
     echo -e "Required arguments:"
-    echo -e "   -s  --sample             Unique sample name"
-    echo -e "   -i  --input              /path/to/sample.data"
+    echo -e "   -s  --sample             Unique sample name for saving files"
+    echo -e "   -i  --input              /path/to/input.data"
     echo -e "                               Format: BAM from WES and panel sequencing, BAM/vcf/high20 from WGS"
-    echo -e "   -d  --data_type          Sequencing data type. Options: WGS, WES, panel, custom, etc."
+    echo -e "   -d  --data_type          Sequencing data type. Options: WGS, WES, cfDNA, panel, custom, etc."
     echo -e "   -r  --reference          Genome reference (same for bam files). /path/to/reference.fa"
     echo -e "   -p  --panel_bin          Bed file of your panel bins. /path/to/panel_bin.bed"
     echo -e "                               Options: 'WES' to use files from /SubChrom/data/, 'WGS' to skip"
@@ -60,15 +61,18 @@ usage()
     echo -e "   -n  --normal             Panel of Normals, or bedGraph file of a normal sample. /path/to/PoN.txt"
     echo -e "                               Default: none"
     echo -e "   -cs --coverage_seg       Perform coverage segmentation. Options: True, False (default)"
-    echo -e "                               If --normal is none above for WGS/panel data, this is False by default"
+    echo -e "                               If --normal is none above for WES/panel data, this is False by default"
+    echo -e "   -rs --ROH_seg            Perform ROH (runs of homozygosity) segmentation. Options: True, False (default)"
+    echo -e "                               Required for high purity samples, in which no heterozygotes in cnLOH and loss"
     echo -e "   -mf --minTF              Minimal tumor fraction to report a CNV event. Default: 0.1. Minimum: 0.01"
     echo -e "   -ms --minSize            Minimal size (bp) to report a CNV event. Default: 1000000. Minimum: 10000"
     echo -e "   -mb --minBins            Minimal number of bins to report a CNV event. Default: 100. Minimum: 10"
     echo -e "   -sg --sample_gender      Options: Male/M, Female/F, auto. Default: auto for automatic detection"
     echo -e "   -dd --diploid_depth      How to compute the diploid depth."
-    echo -e "                               Options: auto, chr1...chr22, chrX, a specific value such as 500"
+    echo -e "                               Options: auto, chr1, ..., chr22, chrX, a specific value such as 500"
     echo -e "                               Default: auto for automatic optimization"
-    echo -e "   -cw --covWinSize         Coverage window size (bp) for visualization. Default: 2000000. Minimum: 500000"
+    echo -e "   -cw --covWinSize         Coverage window size (bp) for visualization"
+    echo -e "                               Default: auto (WGS, 1000000; WES/cfDNA, 2000000. Minimum: 500000"
     echo -e "   -pf --plotTF             Plot tumor fraction or not. Options: True (default), False"
     echo -e "   -if --intermediate_file  Use intermediate files from the previous run, such as vcf file and segements"
     echo -e "                               Options: True (default), False (remove previous files and generate new ones)"
@@ -124,7 +128,11 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         -cs | --coverage_seg)
-            covSeg=$2
+            COVseg=$2
+            shift
+            ;;
+        -rs | --ROH_seg)
+            ROHseg=$2
             shift
             ;;
         -mf | --minTF)
@@ -176,6 +184,7 @@ done
 # Setup
 #################################################################################
 
+echo ""
 # code & directory
 script_path="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
@@ -290,10 +299,19 @@ if [[ $PON == 'WES' ]] || [[ $PON == 'cfDNA' ]]; then
 fi
 
 # check PoN
-if [[ $PON != 'N' ]] && [[ ! -f $PON ]]; then
+if [[ $PON != 'none' ]] && [[ ! -f $PON ]]; then
     echo "ERROR: Panel of Normals ($PON) not found!"
     usage
     exit 1
+fi
+
+# covWindow
+if [[ $covWindow == 'auto' ]]; then
+    if [[ $DTYPE == 'WGS' ]]; then
+        covWindow=1000000
+    else
+        covWindow=2000000
+    fi
 fi
 
 # check gene list
@@ -331,7 +349,7 @@ if [[ $DATA == *'bam' ]]; then
     echo -e "******************** run bedGraph ********************"
     if [[ ! -f ${SAMPLE}.${DTYPE}.bedGraph ]] ; then
         cmd="$script_path/bedGraph.sh -s $SAMPLE -i $DATA -d $DTYPE -p $PANELBIN"
-        echo -e "$cmd"
+        echo -e "$cmd\n"
         $cmd
     else
         echo -e "Found bedGraph file ...\n"
@@ -339,8 +357,9 @@ if [[ $DATA == *'bam' ]]; then
     
     # gatk_HaplotypeCaller
     echo -e "******************** run gatkHC ********************"
-    if [[ ! -f ${SAMPLE}.${DTYPE}.gatkHC.vcf.gz ]]; then   
+    if [[ ! -f ${SAMPLE}.${DTYPE}.gatkHC.vcf.gz ]]; then
         echo -e "gatk --java-options '-Xmx10G' HaplotypeCaller -R $REF -I $DATA -O ${SAMPLE}.${DTYPE}.gatkHC.vcf.gz"
+        echo ""
         gatk --java-options "-Xmx10G" HaplotypeCaller -R $REF -I $DATA -O ${SAMPLE}.${DTYPE}.gatkHC.vcf.gz
     else
         echo -e "Found gatkHC file ...\n"
@@ -350,7 +369,7 @@ if [[ $DATA == *'bam' ]]; then
     echo -e "******************** run SNP cleaning ********************"
     if [[ ! -f ${SAMPLE}.${DTYPE}.snp.txt ]]; then
         cmd="$script_path/rename_chrs_clean_blacklist.sh $SAMPLE ${SAMPLE}.${DTYPE}.gatkHC.vcf.gz $GBUILD $DTYPE $script_path"
-        echo -e "$cmd"
+        echo -e "$cmd\n"
         $cmd
     else
         echo -e "Found cleaned variant file ...\n"
@@ -360,7 +379,7 @@ elif [[ $DATA == *'vcf'* ]]; then
     echo -e "******************** run SNP cleaning ********************"    
     if [[ ! -f ${SAMPLE}.${DTYPE}.snp.txt ]]; then
         cmd="$script_path/rename_chrs_clean_blacklist.sh $SAMPLE $DATA $GBUILD $DTYPE $script_path"
-        echo -e "$cmd"
+        echo -e "$cmd\n"
         $cmd
     else
         echo -e "Found cleaned variant file ...\n"
@@ -378,6 +397,6 @@ elif [[ $DATA == *'.out' ]] && [[ ! -f ${SAMPLE}.${DTYPE}.snp.txt ]]; then
 fi
 
 # SubChrom
-cmd="python $script_path/SubChrom_segmentation.py -s $SAMPLE -t $DTYPE -g $GBUILD -n $PON -cs $covSeg -md $SNPmarker -minTF $minTF -minSize $minSize -minBins $minBins -gender $GENDER -dd $dipDep -covWin $covWindow -plotTF $plotTF -genes $GENES"
+cmd="python $script_path/SubChrom_segmentation.py -s $SAMPLE -d $DTYPE -g $GBUILD -n $PON -cs $COVseg -rs $ROHseg -md $SNPmarker -minTF $minTF -minSize $minSize -minBins $minBins -gender $GENDER -dd $dipDep -covWin $covWindow -plotTF $plotTF -genes $GENES"
 echo -e "******************** run SubChrom ********************\n$cmd"
 $cmd
