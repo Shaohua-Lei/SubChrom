@@ -10,7 +10,7 @@ SubChrom performs segmenation on coverage and variant allele frequency (VAF) for
 ## Installation
 1. Checkout the latest release of SubChrom from GitHub
     ```
-    git clone git@github.com:MullighanLab/SubChrom.git
+    git clone git@github.com:Shaohua-Lei/SubChrom.git
     ```
 2. Download the SubChrom [database](https://zenodo.org/records/10155688) to the `/path/to/SubChrom/data` directory and unzip it.
 3. Install dependencies
