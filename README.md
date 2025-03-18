@@ -18,7 +18,7 @@ SubChrom performs segmenation on coverage and variant allele frequency (VAF) for
    - [bcftools (>=1.14)](https://samtools.github.io/bcftools/bcftools.html)
    - [deeptools (>=3.5.0)](https://deeptools.readthedocs.io/en/develop/content/installation.html)
    - [bedtools (>=2.30.0)](https://bedtools.readthedocs.io/en/latest/content/installation.html)
-   - Python3 with packages: [pybedtools](https://daler.github.io/pybedtools/main.html), pandas v1.3.5, numpy v1.21.6, matplotlib v3.5.3, scipy v1.7.3, copy, argparse, os, shutil
+   - Python v3.7.3 with packages: [pybedtools](https://daler.github.io/pybedtools/main.html), pandas v1.3.5, numpy v1.21.6, matplotlib v3.5.3, scipy v1.7.3, copy, argparse, os, shutil
 
 ## Panel Bins
 For custom panel sequencing data, the first step is to generate a set of target bins of your panel. The default size of target bins is 500bp, and it can be tuned using the option `-s/--size`. A smaller bin size will yield more target bins, presumably resulting in higher resolution for coverage segmentation with noisier bins.
